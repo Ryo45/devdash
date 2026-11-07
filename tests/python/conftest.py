@@ -77,6 +77,9 @@ class Fake:
     async def readiness(self, work):
         return True
 
+    async def validate_registration(self, work):
+        pass
+
     async def scan(self, scope):
         return ["importable.service"]
 

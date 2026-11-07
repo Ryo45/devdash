@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from .self_protection import application_unit
+
 
 class ConfigError(ValueError):
     pass
@@ -96,6 +98,7 @@ class Config:
                     and not work.get("docker"),
                     f"Invalid systemd reference {key}",
                 )
+                require(not application_unit(unit), f"devdash cannot manage itself: {unit}")
                 identity = ("systemd", work["scope"], unit)
             elif work.get("backend") == "docker":
                 require(

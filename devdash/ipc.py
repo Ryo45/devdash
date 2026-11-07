@@ -16,6 +16,7 @@ from .backend import Backends
 from .engine import Engine
 from .model import Config
 from .protocol import CORE_PROTOCOL, MUTATIONS, CompatibilityError, check_core, check_request
+from .self_protection import reject_application_unit
 
 LIMIT = 4 * 1024 * 1024
 
@@ -125,31 +126,42 @@ class Server:
         elif command == "logs":
             return await engine.backend.logs(engine.config.workloads[value["target"]])
         elif command == "import":
-            if engine.busy:
-                raise ValueError("Import is unavailable during an operation")
-            available = set(await engine.backend.scan(value["scope"]))
-            # Scan yields to other clients: recheck before mutating configuration.
-            if engine.busy:
-                raise ValueError("Import is unavailable during an operation")
-            unknown = set(value["units"]) - available
-            if unknown:
-                raise ValueError("Scan: units not available: " + ", ".join(sorted(unknown)))
-            if Config.load(self.config_path).json() != engine.config.json():
-                raise ValueError("Configuration changed on disk; restart Core before importing")
-            config = Config(engine.config.json())
-            ids = [config.import_unit(unit, value["scope"]) for unit in value["units"]]
-            backup = self.config_path.with_suffix(self.config_path.suffix + ".bak")
-            backup.write_text(self.config_path.read_text())
-            temporary = self.config_path.with_suffix(self.config_path.suffix + ".tmp")
-            temporary.write_text(yaml.safe_dump(config.json(), sort_keys=False, allow_unicode=True))
-            temporary.replace(self.config_path)
-            engine.config = config
-            engine.backend.systemd.config = config
-            engine.invalidate()
-            return ids
+            return await self.import_units(value)
         else:
             raise ValueError(f"Unknown command: {command}")
         return engine.snapshot()
+
+    async def import_units(self, value):
+        engine = self.engine
+        if engine.busy:
+            raise ValueError("Import is unavailable during an operation")
+        for unit in value["units"]:
+            reject_application_unit(unit)
+        available = set(await engine.backend.scan(value["scope"]))
+        unknown = set(value["units"]) - available
+        if unknown:
+            raise ValueError("Scan: units not available: " + ", ".join(sorted(unknown)))
+        for unit in value["units"]:
+            await engine.backend.validate_registration(
+                {"backend": "systemd", "scope": value["scope"], "unit": unit}
+            )
+        # Read-only resolution yielded to clients; recheck before changing config.
+        if engine.busy:
+            raise ValueError("Import is unavailable during an operation")
+        if Config.load(self.config_path).json() != engine.config.json():
+            raise ValueError("Configuration changed on disk; restart Core before importing")
+        config = Config(engine.config.json())
+        ids = [config.import_unit(unit, value["scope"]) for unit in value["units"]]
+        self.config_path.with_suffix(self.config_path.suffix + ".bak").write_text(
+            self.config_path.read_text()
+        )
+        temporary = self.config_path.with_suffix(self.config_path.suffix + ".tmp")
+        temporary.write_text(yaml.safe_dump(config.json(), sort_keys=False, allow_unicode=True))
+        temporary.replace(self.config_path)
+        engine.config = config
+        engine.backend.systemd.config = config
+        engine.invalidate()
+        return ids
 
     async def handle(self, reader, writer):
         task = asyncio.current_task()

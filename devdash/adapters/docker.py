@@ -200,10 +200,6 @@ class DockerAPI:
             raise RuntimeError(f"Controller: {reply.get('error', 'RPC failed; outcome unknown')}")
         return reply["data"]
 
-    async def children(self, info, controller):
-        reply = await self.rpc(info, controller, {"command": "snapshot"})
-        return controller_children(epoch(info), controller, reply)
-
     async def observe(self, work, info):
         state = info["State"]
         status = state.get("Status", "unknown")

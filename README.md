@@ -38,18 +38,18 @@ UbuntuのシステムPythonを明示するなら`uv sync --locked --extra gui --
 
 ## 常駐運用・自動起動・更新
 
-Core/GUIは`devdash-python 0.2.0`、ROS Bridgeは独立した`devdash-roslaunch 0.1.1`です。
+Core/GUIは`devdash-python 0.2.1`、ROS Bridgeは独立した`devdash-roslaunch 0.1.1`です。
 [常駐運用手順](docs/resident-operation.md)に、版固定インストール、配置、更新・ロールバック、互換性とトラブルシューティングをまとめています。
 
-本番用はレビュー済みの`v0.2.0`等へソースを固定し、wheelとハッシュ付き依存一覧から専用venvを作ります。
+本番用はレビュー済みの`v0.2.1`等へソースを固定し、wheelとハッシュ付き依存一覧から専用venvを作ります。
 
 ```bash
 uv build --wheel
-uv export --locked --no-dev --extra gui --no-emit-project --output-file dist/devdash-0.2.0-requirements.txt
-DEVDASH_RELEASE="$HOME/.local/share/devdash/versions/0.2.0"
+uv export --locked --no-dev --extra gui --no-emit-project --output-file dist/devdash-0.2.1-requirements.txt
+DEVDASH_RELEASE="$HOME/.local/share/devdash/versions/0.2.1"
 uv venv --python /usr/bin/python3 "$DEVDASH_RELEASE"
-uv pip install --python "$DEVDASH_RELEASE/bin/python" --require-hashes -r dist/devdash-0.2.0-requirements.txt
-uv pip install --python "$DEVDASH_RELEASE/bin/python" --no-deps dist/devdash_python-0.2.0-py3-none-any.whl
+uv pip install --python "$DEVDASH_RELEASE/bin/python" --require-hashes -r dist/devdash-0.2.1-requirements.txt
+uv pip install --python "$DEVDASH_RELEASE/bin/python" --no-deps dist/devdash_python-0.2.1-py3-none-any.whl
 ln -sfn "$DEVDASH_RELEASE" "$HOME/.local/share/devdash/current"
 ```
 
@@ -130,6 +130,12 @@ system unitの操作ではD-Busのinteractive authorizationを許可し、system
 デスクトップのPolkitエージェントと適切な権限が必要です。認可できなければ理由を表示し、GUIをrootで起動したり独自の昇格デーモンを使ったりはしません。
 journalログも現在ユーザーの閲覧権限の範囲になります。
 
+## 自己管理の防止
+
+Core/GUI自身のunitは管理対象にできません。既定名は設定で拒否し、別名やaliasはD-Busの所属unit・ExecStartを使ってImport時と操作直前にも確認します。
+Core自体の再起動は`systemctl --user restart devdash-core.service`等で行ってください。ROS BridgeのWorkloadは引き続き操作できます。
+判定範囲・テスト・今回のコード整理は[自己管理防止の記録](docs/self-protection.md)を参照してください。
+
 ## 構成
 
 - `devdash/model.py`: YAML検証、Group展開、安定したWorkload参照。
@@ -168,7 +174,7 @@ uv run ruff check devdash tests/python
 uv run ruff format --check devdash tests/python
 ```
 
-Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性の追加分も含め、パラメーター化した151テストを検証しています。
+Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性の追加分も含め、パラメーター化した189テストを検証しています。
 専用D-Busの返信順序・切断・再接続、実user unit、専用Docker、Tkinter GUI、別CoreプロセスのIPCを含みます。
 常駐運用の追加テストにはCoreのSIGTERM/SIGKILL、GUIの通信断復旧、旧/非互換IPC、配布unitでの自動再起動とWorkloadのPID維持を含みます。
 対応表と移植中に見つかった不具合、テストの書きやすさの比較は[テスト復元記録](docs/test-restoration.md)を参照してください。

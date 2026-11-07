@@ -48,6 +48,8 @@ async def test_job_completion_before_and_after_reply(early, result):
         return "/unit/a", {"Id": name}
 
     async def call(*args, **kwargs):
+        if args[0] == "GetAll":
+            return [{"ExecStart": []}]
         if early:
             removed(session, "/job/1", result)
         else:
@@ -74,6 +76,8 @@ async def test_owner_loss_terminates_wait_without_replay():
         return "/unit/a", {"Id": name}
 
     async def call(*args, **kwargs):
+        if args[0] == "GetAll":
+            return [{"ExecStart": []}]
         calls.append(args[0])
         return ["/job/1"]
 
@@ -129,6 +133,8 @@ async def test_unrelated_jobs_during_pending_method_are_flushed_after_reply():
         return "/unit/a", {"Id": name}
 
     async def call(*args, **kwargs):
+        if args[0] == "GetAll":
+            return [{"ExecStart": []}]
         removed(session, "/job/other")
         removed(session, "/job/ours")
         assert not backend.events

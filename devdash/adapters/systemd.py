@@ -14,6 +14,7 @@ from dbus_fast.aio import MessageBus
 
 from ..inspection import PROPERTIES, Graph
 from ..model import UnitKey, observation
+from ..self_protection import application_unit, reject_application_service, reject_application_unit
 
 SERVICE = "org.freedesktop.systemd1"
 PATH = "/org/freedesktop/systemd1"
@@ -42,6 +43,7 @@ class Session:
         self.backend, self.scope, self.generation = backend, scope, generation
         self.bus = None
         self.owner = ""
+        self.own_path = None
         self.lost = asyncio.Event()
         self.reason = None
         self.published = False
@@ -96,6 +98,11 @@ class Session:
         )[0]
         if owner != self.owner:
             raise RuntimeError("manager changed during subscription")
+        try:
+            self.own_path = (await self.call("GetUnitByPID", "u", [os.getpid()]))[0]
+        except BusError as error:
+            if error.name not in (SERVICE + ".NoSuchUnit", SERVICE + ".NoUnitForPID"):
+                raise
         self.check()
         self.disconnect_task = asyncio.create_task(self.disconnected())
         return self
@@ -276,12 +283,22 @@ class Session:
             self.fail(f"Invalid manager event: {error}")
         return None
 
+    async def managed_unit(self, name):
+        reject_application_unit(name)
+        path, unit = await self.unit(name)
+        reject_application_service(path, unit, {}, self.own_path)
+        service = (
+            await self.properties(path, SERVICE + ".Service") if name.endswith(".service") else {}
+        )
+        reject_application_service(path, unit, service, self.own_path)
+        return path, unit
+
     async def operate(self, work, action, lease):
         # Pin before checking the captured old lease; a new manager never receives
         # the next operation from an interrupted sequence.
         if lease is not None and lease.is_set():
             raise RuntimeError("Manager generation changed; sequence will not resume")
-        _, properties = await self.guarded(self.unit(work["unit"]), timeout=5)
+        _, properties = await self.guarded(self.managed_unit(work["unit"]), timeout=5)
         unit = properties["Id"]
         self.check()
         self.issuing[unit] = self.issuing.get(unit, 0) + 1
@@ -476,16 +493,21 @@ class Systemd:
             memory_bytes=valid(service.get("MemoryCurrent")),
         )
 
+    async def validate_registration(self, work):
+        session = self.session(work["scope"])
+        await session.guarded(session.managed_unit(work["unit"]), timeout=5)
+
     async def scan(self, scope):
         session = self.session(scope)
 
         async def scan():
             files = (await session.call("ListUnitFiles"))[0]
             loaded = (await session.call("ListUnits"))[0]
-            return sorted(
-                {row[0].rsplit("/", 1)[-1] for row in files if row[0].endswith(".service")}
-                | {row[0] for row in loaded if row[0].endswith(".service")}
-            )
+            own_names = {row[0] for row in loaded if row[6] == session.own_path}
+            names = {row[0].rsplit("/", 1)[-1] for row in files if row[0].endswith(".service")} | {
+                row[0] for row in loaded if row[0].endswith(".service")
+            }
+            return sorted(name for name in names - own_names if not application_unit(name))
 
         return await asyncio.wait_for(scan(), 5)
 

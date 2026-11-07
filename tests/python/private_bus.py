@@ -64,6 +64,9 @@ class Manager:
         self.hold_job = False
         self.burst = 0
         self.paths = {}
+        self.own_unit = None
+        self.aliases = {}
+        self.exec_start = {}
         self.block = {}
         self.entered = {key: asyncio.Event() for key in ("subscribe", "load", "read", "reply")}
 
@@ -83,6 +86,16 @@ class Manager:
         if named:
             await self.bus.request_name(systemd.SERVICE)
         return self
+
+    def unit_path(self, name):
+        unit = self.aliases.get(name, name)
+        path = (
+            systemd.PATH
+            + "/unit/"
+            + unit.replace(".", "_2e").replace("-", "_2d").replace("@", "_40")
+        )
+        self.paths[path] = unit
+        return path
 
     def message(self, message):
         if message.message_type != MessageType.METHOD_CALL or message.path is None:
@@ -104,12 +117,17 @@ class Manager:
                 await self.checkpoint("subscribe")
                 self.subscriptions += 1
                 reply = Message.new_method_return(message)
+            elif member == "GetUnitByPID":
+                reply = (
+                    Message.new_method_return(message, "o", [self.unit_path(self.own_unit)])
+                    if self.own_unit
+                    else Message.new_error(
+                        message, systemd.SERVICE + ".NoUnitForPID", "No fixture unit owns this PID"
+                    )
+                )
             elif member == "LoadUnit":
                 await self.checkpoint("load")
-                unit = message.body[0]
-                path = systemd.PATH + "/unit/" + unit.replace(".", "_2e").replace("-", "_2d")
-                self.paths[path] = unit
-                reply = Message.new_method_return(message, "o", [path])
+                reply = Message.new_method_return(message, "o", [self.unit_path(message.body[0])])
             elif member == "GetAll":
                 unit = self.paths[message.path]
                 if message.body[0] == systemd.SERVICE + ".Unit":
@@ -123,8 +141,36 @@ class Manager:
                         InvocationID=Variant("ay", b"\0" * 16),
                     )
                 else:
-                    props = {"MainPID": Variant("u", 0)}
+                    props = {
+                        "MainPID": Variant("u", 0),
+                        "ExecStart": Variant("a(sasbttttuii)", self.exec_start.get(unit, [])),
+                    }
                 reply = Message.new_method_return(message, "a{sv}", [props])
+            elif member in ("ListUnits", "ListUnitFiles"):
+                names = {"same.service", "after.service", *self.aliases, *self.exec_start}
+                if self.own_unit:
+                    names.add(self.own_unit)
+                if member == "ListUnitFiles":
+                    reply = Message.new_method_return(
+                        message, "a(ss)", [[["/tmp/" + name, "disabled"] for name in sorted(names)]]
+                    )
+                else:
+                    rows = [
+                        [
+                            name,
+                            "fixture",
+                            "loaded",
+                            "inactive",
+                            "dead",
+                            "",
+                            self.unit_path(name),
+                            0,
+                            "",
+                            "/",
+                        ]
+                        for name in sorted(names)
+                    ]
+                    reply = Message.new_method_return(message, "a(ssssssouso)", [rows])
             elif member in ("StartUnit", "StopUnit", "RestartUnit"):
                 assert message.flags & MessageFlag.ALLOW_INTERACTIVE_AUTHORIZATION
                 unit = message.body[0]
@@ -224,10 +270,11 @@ class Harness:
         self.managers[scope] = peer
         return peer
 
-    async def start(self, named=True):
+    async def start(self, named=True, own_units=None):
         for scope, bus in self.buses.items():
             await bus.start()
-            await self.peer(scope, named)
+            peer = await self.peer(scope, named)
+            peer.own_unit = (own_units or {}).get(scope)
         await self.backend.start()
         return self
 

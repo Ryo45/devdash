@@ -10,6 +10,7 @@ from .adapters.docker import DockerAPI, controller_children, epoch, host_rpc, re
 from .adapters.systemd import Systemd
 from .model import observation
 from .protocol import bridge_info
+from .self_protection import SelfManagementError
 
 
 class Backends:
@@ -18,15 +19,13 @@ class Backends:
         self.apis = {}
         self.lock = asyncio.Lock()
         self.requests = {}
-        self._emit = lambda event: None
 
     @property
     def emit(self):
-        return self._emit
+        return self.systemd.emit
 
     @emit.setter
     def emit(self, emit):
-        self._emit = emit
         self.systemd.emit = emit
 
     @property
@@ -41,6 +40,20 @@ class Backends:
 
     async def start(self):
         await self.systemd.start()
+
+        async def validate(work):
+            try:
+                await self.validate_registration(work)
+            except SelfManagementError:
+                raise
+            except Exception:
+                pass  # Missing/unreachable registered units remain observable.
+
+        await asyncio.gather(*(validate(work) for work in self.systemd.config.workloads.values()))
+
+    async def validate_registration(self, work):
+        if work["backend"] == "systemd":
+            await self.systemd.validate_registration(work)
 
     def requested(self, work):
         now = time.monotonic()

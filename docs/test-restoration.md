@@ -1,6 +1,6 @@
 # Rust版テストのPython移植と書きやすさ
 
-この文書はテスト復元時（118ケース）の記録です。その後、[常駐運用・互換性](resident-operation.md)のテストを追加し、現在は151ケースです。
+この文書はテスト復元時（118ケース）の記録です。その後、[常駐運用・互換性](resident-operation.md)と[自己管理防止](self-protection.md)のテストを追加し、現在は自己管理防止も含め189ケースです。
 
 比較元はRust版 `35ecdea`（`archive/rust-gpui`）です。`tests/*.rs`と`src/docker.rs`・`src/systemd_events.rs`内のテスト、合計65本を照合しました。
 Pythonでは1本のRustテストを複数の独立テストやパラメーターに分けているため、本数の一致は目標にしていません。
@@ -76,8 +76,8 @@ ROS 2 Jazzyの独立Bridgeは今回変更していないため、任意の実ROS
 | Rustのテスト | Pythonで保証するテスト |
 | --- | --- |
 | `reply_and_completion_order_do_not_change_attribution` | [test_job_completion_before_and_after_reply](../tests/python/test_protocol.py#L42) |
-| `unrelated_jobs_during_pending_method_are_flushed_after_reply` | [test_unrelated_jobs_during_pending_method_are_flushed_after_reply](../tests/python/test_protocol.py#L123) |
-| `overflow_marks_tracking_unknown_instead_of_clearing_owned_jobs_silently` | [test_overflow_marks_tracking_unknown_without_silently_losing_owned_jobs](../tests/python/test_protocol.py#L144) |
+| `unrelated_jobs_during_pending_method_are_flushed_after_reply` | [test_unrelated_jobs_during_pending_method_are_flushed_after_reply](../tests/python/test_protocol.py#L127) |
+| `overflow_marks_tracking_unknown_instead_of_clearing_owned_jobs_silently` | [test_overflow_marks_tracking_unknown_without_silently_losing_owned_jobs](../tests/python/test_protocol.py#L150) |
 
 ### [tests/authorization.rs](https://github.com/Ryo45/devdash/blob/35ecdea/tests/authorization.rs) — 1件
 

@@ -114,3 +114,32 @@ async def test_import_does_not_mutate_config_when_operation_starts_during_scan(i
         if engine.busy:
             engine.request_cancel()
             await engine.wait()
+
+
+async def test_import_rechecks_busy_after_registration_resolution(ipc_fixture):
+    engine, backend, socket, path = ipc_fixture
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def validate(work):
+        entered.set()
+        await release.wait()
+
+    backend.validate_registration = validate
+    before = path.read_bytes()
+    imported = asyncio.create_task(
+        request(socket, {"command": "import", "scope": "user", "units": ["importable.service"]})
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        engine.launch("robot", True, "start")
+        await until(lambda: engine.run["waiting_gate"] == "ready")
+        release.set()
+        with pytest.raises(RuntimeError, match="during an operation"):
+            await imported
+        assert path.read_bytes() == before and "importable" not in engine.config.workloads
+    finally:
+        release.set()
+        await asyncio.gather(imported, return_exceptions=True)
+        if engine.busy:
+            engine.request_cancel()
+            await engine.wait()

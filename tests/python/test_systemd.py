@@ -314,9 +314,21 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
     backend = Backends(config)
     await backend.start()
     manager = backend.systemd.session("user")
-    core_work = {"scope": "user", "unit": core_name}
     worker = config.workloads["worker"]
     files = []
+
+    async def control_core(action):
+        # Core lifecycle belongs to the operator/systemd, never to Workload APIs.
+        process = await asyncio.create_subprocess_exec(
+            "systemctl",
+            "--user",
+            action,
+            core_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, error = await asyncio.wait_for(process.communicate(), 15)
+        assert process.returncode == 0, error.decode()
 
     async def core_when(predicate):
         async def poll():
@@ -347,11 +359,16 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
         await manager.call("Reload")
         await backend.operate(worker, "start")
         original = await backend.observe(worker)
-        await backend.systemd.operate(core_work, "start")
+        await control_core("start")
         initial = await core_when(
             lambda value: value["observations"].get("worker", {}).get("state") == "active"
         )
         assert initial["run"]["status"] == "" and not initial["approved"]
+        assert core_name not in await request(socket, {"command": "scan", "scope": "user"})
+        before_import = config_path.read_text()
+        with pytest.raises(RuntimeError, match="not available|cannot manage itself"):
+            await request(socket, {"command": "import", "scope": "user", "units": [core_name]})
+        assert config_path.read_text() == before_import
         assert socket.stat().st_mode & 0o777 == 0o600
         await unchanged(original)
         await request(socket, dict(command="operate", target="robot", group=True, action="start"))
@@ -366,10 +383,10 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
         )
         assert recovered["run"]["status"] == "" and not recovered["approved"]
         await unchanged(original)
-        await backend.systemd.operate(core_work, "stop")
+        await control_core("stop")
         assert not socket.exists()
         await unchanged(original)
-        await backend.systemd.operate(core_work, "start")
+        await control_core("start")
         restarted = await core_when(
             lambda value: value["observations"].get("worker", {}).get("state") == "active"
         )
@@ -380,8 +397,8 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
         await core_when(lambda value: value["run"]["waiting_gate"] == "ready")
         await request(socket, {"command": "approve", "gate": "ready"})
         await core_when(lambda value: value["run"]["status"] == "completed")
-        await backend.systemd.operate(core_work, "stop")
-        await backend.systemd.operate(core_work, "start")
+        await control_core("stop")
+        await control_core("start")
         restored = await core_when(
             lambda value: value["observations"].get("worker", {}).get("state") == "active"
         )
@@ -393,9 +410,12 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
         for name in (core_name, worker_name):
             if any(path.name == name for path in files):
                 try:
-                    await asyncio.wait_for(
-                        backend.systemd.operate({"scope": "user", "unit": name}, "stop"), 10
-                    )
+                    if name == core_name:
+                        await control_core("stop")
+                    else:
+                        await asyncio.wait_for(
+                            backend.systemd.operate({"scope": "user", "unit": name}, "stop"), 10
+                        )
                 except Exception as error:
                     errors.append(str(error))
                 try:

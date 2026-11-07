@@ -1,6 +1,6 @@
 # 常駐運用・更新・互換性
 
-Core/GUIは同じ`devdash-python`パッケージ（0.2.0）、ROS Bridgeは独立した`devdash-roslaunch`パッケージ（0.1.1）です。
+Core/GUIは同じ`devdash-python`パッケージ（0.2.1）、ROS Bridgeは独立した`devdash-roslaunch`パッケージ（0.1.1）です。
 Core/GUI IPCとROS Bridge IPCはそれぞれ世代番号1を持ち、パッケージ版番号の一致を要求しません。
 GUI、Core、Workloadのライフサイクルは独立しています。インストール・テンプレート出力だけでは、サービスのenable、linger、GUI自動起動登録を行いません。
 
@@ -8,7 +8,7 @@ GUI、Core、Workloadのライフサイクルは独立しています。イン�
 
 | 内容 | テンプレートの配置 |
 | --- | --- |
-| リリースごとの専用venv | `~/.local/share/devdash/versions/0.2.0/` |
+| リリースごとの専用venv | `~/.local/share/devdash/versions/0.2.1/` |
 | 使用版のsymlink | `~/.local/share/devdash/current` |
 | 設定 | `~/.config/devdash/config.yaml` |
 | Core unit | `~/.config/systemd/user/devdash-core.service` |
@@ -28,16 +28,16 @@ UbuntuのシステムPythonを使用する例です。Core専用venvにROSの`--
 ```bash
 sudo apt-get install -y python3-venv python3-tk
 # レビュー済みのソースを選ぶ。別の版を使う場合は以下の版番号も合わせる。
-git checkout v0.2.0
+git checkout v0.2.1
 uv build --wheel
 uv export --locked --no-dev --extra gui --no-emit-project \
-  --output-file dist/devdash-0.2.0-requirements.txt
-DEVDASH_RELEASE="$HOME/.local/share/devdash/versions/0.2.0"
+  --output-file dist/devdash-0.2.1-requirements.txt
+DEVDASH_RELEASE="$HOME/.local/share/devdash/versions/0.2.1"
 uv venv --python /usr/bin/python3 "$DEVDASH_RELEASE"
 uv pip install --python "$DEVDASH_RELEASE/bin/python" --require-hashes \
-  -r dist/devdash-0.2.0-requirements.txt
+  -r dist/devdash-0.2.1-requirements.txt
 uv pip install --python "$DEVDASH_RELEASE/bin/python" --no-deps \
-  dist/devdash_python-0.2.0-py3-none-any.whl
+  dist/devdash_python-0.2.1-py3-none-any.whl
 "$DEVDASH_RELEASE/bin/python" -I -m devdash --version
 mkdir -p "$HOME/.local/share/devdash"
 ln -sfn "$DEVDASH_RELEASE" "$HOME/.local/share/devdash/current"
@@ -45,7 +45,7 @@ ln -sfn "$DEVDASH_RELEASE" "$HOME/.local/share/devdash/current"
 
 wheelとハッシュ付きrequirementsを一緒に保管します。venvは作成したパスから移動せず、稼働中のvenvへ上書きインストールしません。
 Coreだけならexportの`--extra gui`を外せます。デスクトップ側でも同じvenvを使う運用ではgui extraを含めます。
-0.2.0の依存・ソースを固定する手順であり、OS側のPython/Tcl/Tkを独自配布する仕組みは追加しません。
+0.2.1の依存・ソースを固定する手順であり、OS側のPython/Tcl/Tkを独自配布する仕組みは追加しません。
 
 ## Coreのuser service
 
@@ -154,8 +154,8 @@ Core/GUIの更新ごとにBridge更新は不要です。0.1.1はBridge IPC世代
 
 ## 今回の検証と制約
 
-Ubuntu 24.04 / Python 3.12.3で全151テストが成功しました。内訳はGUI 2、実systemd 4、専用Docker 1、それ以外の144ケースです。
-既存118ケースの保証を維持し、追加した33ケースは次を検証します。
+Ubuntu 24.04 / Python 3.12.3で全189テストを検証しています。内訳はGUI 2、実systemd 4、専用Docker 1、それ以外の182ケースです。
+常駐化時に既存118ケースへ追加した33ケースは次を検証します。さらに0.2.1で、[自己管理防止と競合](self-protection.md)の38ケースを追加しています。
 
 - 起動済みWorkloadを持つ疑似managerに、実Coreプロセスが起動・再起動時のStart/Stopを発行しないこと。
 - Gate待機中・発行済みジョブ待機中にCoreをSIGTERM/SIGKILLし、成否を復元せず、次回の観測から再開すること。
