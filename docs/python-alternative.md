@@ -59,7 +59,8 @@ systemdトランザクションの完全な予測・模倣は行わず、警告�
 
 ## 検証結果
 
-2026-11-07、Ubuntu 24.04 / Python 3.12.3で、34テストが成功しました。
+初回のPython版は2026-11-07、Ubuntu 24.04 / Python 3.12.3で、34テストを確認しました。
+その後Rust版のテストを移植し、118ケースへ拡充しています。最新の対応表と検証は[テスト復元記録](test-restoration.md)を参照してください。
 
 - Core: 階層展開、正逆順、Parallel、部分Restart、承認保持・Reinitialize、個別Gate迂回、boot ID永続化。
 - HTTP Gate: ローカルHTTPサーバーによる成功・タイムアウト。

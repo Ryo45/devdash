@@ -72,7 +72,7 @@ Cancelは未発行Stepをスキップし、発行済みsystemdジョブの結果
 
 GUIのツリーから対象を選択し、Start/Stop/Restartを押します。Manual Gate待機中にApprove Gateを押すと続行します。
 Detailsにmanager、状態、PID、観測値、子要素の操作能力を表示します。Progress/Diagnostics/Events/Logsで進捗・診断・状態変化・ログを確認できます。
-Scan / Importは要求時のみサービスを列挙し、選択した行のunit参照だけを設定へ追加します（複数選択はCtrl/Shift）。元設定は`.yaml.bak`へ保存します。
+Scan / Importは要求時のみサービスを列挙し、選択した行のunit参照だけを設定へ追加します（複数選択はCtrl/Shift）。Import時にも対象managerで存在を確認し、未知のunitを含む一括Importは拒否します。元設定は`.yaml.bak`へ保存します。
 設定の手編集はCore再起動後に反映します。稼働中に手編集した設定はImportで上書きしません。
 
 system unitの操作ではD-Busのinteractive authorizationを許可し、systemd/Polkitに認可を委譲します。
@@ -94,6 +94,7 @@ journalログも現在ユーザーの閲覧権限の範囲になります。
 ## テスト
 
 ```bash
+# テストにはdbus-daemonが必要（Ubuntuでは sudo apt-get install -y dbus-daemon）
 uv run pytest -q
 DEVDASH_GUI_TEST=1 uv run pytest -q tests/python/test_gui.py
 DEVDASH_SYSTEMD_TEST=1 uv run pytest -q tests/python/test_systemd.py
@@ -116,7 +117,9 @@ uv run ruff check devdash tests/python
 uv run ruff format --check devdash tests/python
 ```
 
-実systemd・専用Docker・Tkinter GUI・別プロセスIPCを含む34テストを検証済みです。
+Rust版の65テストが保証していた振る舞いをPythonへ移植し、パラメーター化を含む118テストを検証しています。
+専用D-Busの返信順序・切断・再接続、実user unit、専用Docker、Tkinter GUI、別CoreプロセスのIPCを含みます。
+対応表と移植中に見つかった不具合、テストの書きやすさの比較は[テスト復元記録](docs/test-restoration.md)を参照してください。
 ROS 2 Jazzyの任意テストと制約は[Bridge README](bridges/roslaunch/README.md)を参照してください。
 
 ## ライセンス

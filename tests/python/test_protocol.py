@@ -118,3 +118,41 @@ async def test_polkit_flag_and_error_message():
     session.bus = Bus()
     with pytest.raises(BusError, match="Polkit"):
         await session.call("StartUnit", "ss", ["a.service", "replace"], interactive=True)
+
+
+async def test_unrelated_jobs_during_pending_method_are_flushed_after_reply():
+    backend = Backend()
+    session = Session(backend, "user", 1)
+    session.owner = ":1.42"
+
+    async def unit(name):
+        return "/unit/a", {"Id": name}
+
+    async def call(*args, **kwargs):
+        removed(session, "/job/other")
+        removed(session, "/job/ours")
+        assert not backend.events
+        return ["/job/ours"]
+
+    session.unit, session.call = unit, call
+    await session.operate({"unit": "a.service"}, "start", session.lost)
+    correlations = {facts["job_path"]: facts["correlation"] for _, facts in backend.events}
+    assert correlations == {"/job/ours": "requested", "/job/other": "unrelated"}
+    assert not session.jobs and not session.early
+
+
+async def test_overflow_marks_tracking_unknown_without_silently_losing_owned_jobs():
+    backend = Backend()
+    session = Session(backend, "user", 1)
+    session.owner, session.published = ":1.42", True
+    session.issuing["a.service"] = 1
+    future = asyncio.get_running_loop().create_future()
+    session.jobs["/job/owned"] = ("a.service", future)
+    wait = asyncio.create_task(session.guarded(future))
+    for index in range(257):
+        removed(session, f"/job/{index}")
+    assert session.lost.is_set() and "overflow" in session.reason
+    with pytest.raises(RuntimeError, match="outcome unknown"):
+        await wait
+    assert "/job/owned" in session.jobs
+    assert len(session.early) == 256

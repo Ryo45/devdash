@@ -1,4 +1,5 @@
 import asyncio
+import socket as sockets
 import sys
 
 import pytest
@@ -39,6 +40,23 @@ async def test_real_daemon_disconnect_restart_persistence_and_private_socket(tmp
     try:
         assert socket.stat().st_mode & 0o777 == 0o600
         assert socket.parent.stat().st_mode & 0o777 == 0o700
+        second = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "devdash",
+            "--socket",
+            str(socket),
+            "daemon",
+            "--config",
+            str(config),
+            "--state",
+            str(state),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, error = await asyncio.wait_for(second.communicate(), 5)
+        assert second.returncode != 0 and b"Another Core owns this socket" in error
+        assert (await request(socket, {"command": "snapshot"}))["run"]["status"] == ""
         await request(socket, dict(command="operate", target="robot", group=True, action="start"))
         # Each request disconnects. Core continues waiting without a client.
         await asyncio.sleep(0.05)
@@ -51,6 +69,10 @@ async def test_real_daemon_disconnect_restart_persistence_and_private_socket(tmp
         assert (await request(socket, {"command": "snapshot"}))["run"]["status"] == "completed"
         process.terminate()
         await asyncio.wait_for(process.wait(), 5)
+        assert not socket.exists()
+        abandoned = sockets.socket(sockets.AF_UNIX, sockets.SOCK_STREAM)
+        abandoned.bind(str(socket))
+        abandoned.close()
         process = await start()
         snapshot = await request(socket, {"command": "snapshot"})
         assert snapshot["approved"] == ["ready"]

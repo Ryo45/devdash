@@ -394,13 +394,20 @@ class Engine:
                 and old["invocation_id"] != now["invocation_id"]
             ):
                 recent = self.backend.recent(self.config.workloads[key])
+                transition = f"{old['state']} → {now['state']}"
+                if (
+                    old["invocation_id"]
+                    and now["invocation_id"]
+                    and old["invocation_id"] != now["invocation_id"]
+                ):
+                    transition += "; invocation changed"
                 self.emit(
                     "warning"
                     if now["state"] == "not_found" or self.busy and not recent
                     else "info",
-                    f"{old['state']} → {now['state']} (recent request; causality unconfirmed)"
+                    f"{transition} (recent request; causality unconfirmed)"
                     if recent
-                    else f"{old['state']} → {now['state']} (not correlated with devdash; origin unknown)",
+                    else f"{transition} (not correlated with devdash; origin unknown)",
                     key,
                     "state_changed",
                 )

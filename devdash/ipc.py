@@ -73,6 +73,13 @@ class Server:
         elif command == "import":
             if engine.busy:
                 raise ValueError("Import is unavailable during an operation")
+            available = set(await engine.backend.scan(value["scope"]))
+            # Scan yields to other clients: recheck before mutating configuration.
+            if engine.busy:
+                raise ValueError("Import is unavailable during an operation")
+            unknown = set(value["units"]) - available
+            if unknown:
+                raise ValueError("Scan: units not available: " + ", ".join(sorted(unknown)))
             if Config.load(self.config_path).json() != engine.config.json():
                 raise ValueError("Configuration changed on disk; restart Core before importing")
             config = Config(engine.config.json())
