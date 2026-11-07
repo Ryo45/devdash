@@ -1,0 +1,24 @@
+workloads:
+  camera: {backend: systemd, unit: devdash-demo-camera.service}
+  imu: {backend: systemd, unit: devdash-demo-imu.service}
+  detector: {backend: systemd, unit: devdash-demo-detector.service}
+  planner: {backend: systemd, unit: devdash-demo-planner.service}
+groups:
+  robot:
+    name: Robot
+    steps:
+      - group: sensors
+      - gate: sensors_ready
+      - group: perception
+      - group: planning
+  sensors:
+    steps:
+      - parallel: [camera, imu]
+  perception:
+    steps:
+      - workload: detector
+  planning:
+    steps:
+      - workload: planner
+gates:
+  sensors_ready: {type: manual}

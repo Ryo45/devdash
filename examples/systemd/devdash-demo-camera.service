@@ -1,0 +1,6 @@
+[Unit]
+Description=devdash demo camera (dummy service)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sleep infinity

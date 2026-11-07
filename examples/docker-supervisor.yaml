@@ -1,0 +1,29 @@
+# Existing containers only. devdash does not create containers or supervise their PIDs.
+workloads:
+  perception:
+    name: Perception container
+    backend: docker
+    docker:
+      socket: /var/run/docker.sock
+      compose: {project: robot, service: perception}
+      # Alternatively, replace compose with: container: robot-perception
+    controller:
+      kind: supervisord
+      socket: /run/supervisor.sock
+      python: python3
+  tools:
+    name: Tools (process observation only)
+    backend: docker
+    docker: {container: robot-tools}
+groups:
+  robot:
+    steps:
+      - workload: perception
+      - gate: perception_ready
+      - workload: tools
+gates:
+  perception_ready:
+    type: container_ready
+    workload: perception
+    timeout_ms: 30000
+    interval_ms: 500

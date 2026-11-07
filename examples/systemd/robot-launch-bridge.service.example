@@ -1,0 +1,12 @@
+# Example user unit. Adapt install/setup/launch paths to your environment.
+[Unit]
+Description=Robot launch through the capability-limited devdash bridge
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash; source /opt/robot/install/setup.bash; exec /opt/devdash-roslaunch/bin/devdash-roslaunch --socket %t/devdash/robot-launch.sock /opt/robot/install/share/robot/launch/robot.launch.py'
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=20
+Restart=on-failure
+[Install]
+WantedBy=default.target

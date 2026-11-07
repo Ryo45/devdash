@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>devdash_test_components</name><version>0.1.0</version>
+  <description>Isolated ComponentManager integration fixture</description>
+  <maintainer email="devdash@example.invalid">devdash</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>rclcpp_components</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

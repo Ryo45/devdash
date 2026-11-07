@@ -1,0 +1,18 @@
+# Example only. Adapt the user, ROS installation and launch package for the robot.
+# Install as /etc/systemd/system/robot-sensors.service through your normal deployment.
+[Unit]
+Description=Robot sensors ROS 2 launch
+After=network.target
+
+[Service]
+Type=simple
+User=robot
+WorkingDirectory=/opt/robot
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash; source /opt/robot/install/setup.bash; exec ros2 launch robot_bringup sensors.launch.py'
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=30
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+/target
+/.backups
+/.native
+__pycache__/
+
+/bridges/roslaunch/build/
+/bridges/roslaunch/dist/
+/bridges/roslaunch/*.egg-info/

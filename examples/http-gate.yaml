@@ -1,0 +1,14 @@
+workloads:
+  api: {backend: systemd, unit: my-api.service}
+groups:
+  application:
+    steps:
+      - workload: api
+      - gate: api_ready
+gates:
+  api_ready:
+    type: http
+    url: http://127.0.0.1:8080/health
+    timeout_ms: 30000
+    interval_ms: 500
+    expected_status: 200
