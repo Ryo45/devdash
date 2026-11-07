@@ -8,7 +8,7 @@ import time
 
 from .adapters.docker import DockerAPI, controller_children, epoch, host_rpc, ready
 from .adapters.systemd import Systemd
-from .model import observation
+from .model import docker_reference, observation
 from .protocol import bridge_info
 from .self_protection import SelfManagementError
 
@@ -68,7 +68,7 @@ class Backends:
         )
 
     async def api(self, work):
-        path = work["docker"]["socket"]
+        path = docker_reference(work)["socket"]
         async with self.lock:
             if path not in self.apis:
                 try:
@@ -81,7 +81,7 @@ class Backends:
 
     async def resolved(self, work):
         api = await self.api(work)
-        info = await api.resolve(work["docker"])
+        info = await api.resolve(docker_reference(work))
         if info is None:
             raise RuntimeError("Container not found; no container was created")
         return api, info
@@ -93,39 +93,74 @@ class Backends:
         api, info = await self.resolved(work)
         return await api.operate(info, action)
 
+    async def observe_docker(self, work):
+        api = await self.api(work)
+        info = await api.resolve(docker_reference(work))
+        return await api.observe(work, info) if info else observation(state="not_found")
+
     async def observe(self, work):
         if work["backend"] == "docker":
-            api = await self.api(work)
-            info = await api.resolve(work["docker"])
-            return await api.observe(work, info) if info else observation(state="not_found")
-        result = await self.systemd.observe(work)
-        if controller := work.get("controller"):
+            return await self.observe_docker(work)
+
+        async def lifecycle():
             try:
-                reply = await host_rpc(controller, {"command": "snapshot"})
-                if controller["kind"] == "roslaunch":
-                    result["controller"] = bridge_info(reply)
-                result["children"] = controller_children(
-                    "host:" + work["scope"] + ":" + work["unit"],
-                    controller,
-                    reply,
-                    namespace="host supervisor",
-                )
+                return await asyncio.wait_for(self.systemd.observe(work), 3)
             except Exception as error:
-                result["children_error"] = str(error)
+                return observation(error=str(error))
+
+        async def internal():
+            try:
+                return await asyncio.wait_for(self.observe_internal(work), 3)
+            except Exception as error:
+                message = str(error) or type(error).__name__
+                return observation(observer_error=message, children_error=message)
+
+        # Independent deadlines keep a disconnected observer from hiding systemd state.
+        result, observed = await asyncio.gather(lifecycle(), internal())
+        if observed is not None:
+            result["children"] = observed.pop("children")
+            for field in ("children_error", "observer_error", "controller"):
+                result[field] = observed[field]
+            if docker_reference(work):
+                result["internal"] = observed
+                result["health"] = observed["health"]
+                result["readiness"] = observed["readiness"]
+        return result
+
+    async def observe_internal(self, work):
+        if docker_reference(work):
+            return await self.observe_docker(work)
+        controller = work.get("controller")
+        if not controller:
+            return None
+        reply = await host_rpc(controller, {"command": "snapshot"})
+        result = observation(
+            controller=bridge_info(reply) if controller["kind"] == "roslaunch" else None,
+        )
+        try:
+            result["children"] = controller_children(
+                "host:" + work["scope"] + ":" + work["unit"],
+                controller,
+                reply,
+                namespace="host supervisor",
+            )
+        except Exception as error:
+            result["children_error"] = result["observer_error"] = str(error)
         return result
 
     async def readiness(self, work):
-        if work["backend"] == "docker":
+        # Compatibility container_ready Gate always re-resolves the observer.
+        if docker_reference(work):
             api = await self.api(work)
-            info = await api.resolve(work["docker"])
+            info = await api.resolve(docker_reference(work))
             return info is not None and ready(info)
-        return (await self.systemd.observe(work))["state"] == "active"
+        return False
 
     async def operate_child(self, work, child_id, expected_epoch, action):
         controller = work.get("controller")
         if not controller:
             raise ValueError("No controller configured; OS processes are observation-only")
-        if work["backend"] == "docker":
+        if docker_reference(work):
             api, info = await self.resolved(work)
             prefix = epoch(info)
 

@@ -86,6 +86,10 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
         click(window.buttons["start"])
         wait(lambda: window.snapshot["run"]["waiting_gate"] == "ready")
         assert len(state["backend"].calls) == 2
+        assert "Continue" in window.approve.cget("text")
+        timeline = window.texts["Progress"].get("1.0", "end-1c")
+        assert "WAITING FOR CONTINUE" in timeline and "[NEXT]" in timeline
+        assert "[completed] start · parallel" in timeline
         assert window.buttons["restart"].instate(["disabled"])
         click(window.approve)
         wait(lambda: window.snapshot["run"]["status"] == "completed")
@@ -108,6 +112,9 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
         wait(lambda: window.snapshot["run"]["status"] == "cancelled")
         assert any(step["status"] == "skipped" for step in window.snapshot["run"]["progress"])
         select(["workload", "detector"])
+        assert "Start (systemd)" == window.buttons["start"].cget("text")
+        assert "Lifecycle Controller: systemd" in window.summary.cget("text")
+        assert "Readiness: unknown" in window.summary.cget("text")
         window.logs()
         wait(lambda: "fixture log" in window.texts["Logs"].get("1.0", "end-1c"))
         assert not window.buttons["start"].instate(["disabled"])

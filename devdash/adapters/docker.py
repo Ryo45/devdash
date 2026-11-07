@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 import aiohttp
 
-from ..model import observation
+from ..model import observation, readiness
 from ..protocol import bridge_info, check_bridge
 
 CLIENT = Path(__file__).with_name("controller_client.py").read_text()
@@ -36,6 +36,16 @@ def ready(info):
         and not state.get("Paused")
         and not state.get("Restarting")
         and state.get("Health", {}).get("Status", "healthy") == "healthy"
+    )
+
+
+def container_readiness(info):
+    state = info["State"]
+    health = state.get("Health", {}).get("Status")
+    return readiness(
+        "ready" if ready(info) else "not_ready",
+        "docker health" if health is not None else "docker running",
+        health if health is not None else "No Healthcheck; running state only",
     )
 
 
@@ -208,7 +218,10 @@ class DockerAPI:
             "restarting": "activating",
             "paused": "paused",
             "dead": "failed",
-        }.get(status, "failed" if status == "exited" and state.get("ExitCode") else "inactive")
+            "created": "inactive",
+            "exited": "failed" if state.get("ExitCode") else "inactive",
+            "removing": "deactivating",
+        }.get(status, "unknown")
         result = observation(
             state=observation_state,
             sub_state=status,
@@ -216,6 +229,7 @@ class DockerAPI:
             invocation_id=state.get("StartedAt"),
             pid=state.get("Pid") or None,
             health=state.get("Health", {}).get("Status"),
+            readiness=container_readiness(info),
         )
         if not state.get("Running"):
             return result
@@ -267,6 +281,7 @@ class DockerAPI:
                 result["children"].extend(controller_children(epoch(info), controller, reply))
             except Exception as error:
                 result["children_error"] = f"Controller unavailable; no repair attempted: {error}"
+                result["observer_error"] = result["children_error"]
         result["children"].sort(key=lambda child: (child["kind"] == "process", child["name"]))
         return result
 

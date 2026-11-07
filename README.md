@@ -121,7 +121,7 @@ Group/Workload操作は受付後にCoreで継続します。結果はGUIか`stat
 個別Workload操作はGateを迂回します。Group Restartは逆順停止→正順起動、通常のRestartはManual Gate承認を再利用します。
 Cancelは未発行Stepをスキップし、発行済みsystemdジョブの結果は追跡します。
 
-GUIのツリーから対象を選択し、Start/Stop/Restartを押します。Manual Gate待機中にApprove Gateを押すと続行します。
+GUIのツリーから対象を選択し、Start/Stop/Restartを押します。Manual Gate待機中にContinueを押すと続行します。
 Detailsにmanager、状態、PID、観測値、子要素の操作能力を表示します。Progress/Diagnostics/Events/Logsで進捗・診断・状態変化・ログを確認できます。
 Scan / Importは要求時のみサービスを列挙し、選択した行のunit参照だけを設定へ追加します（複数選択はCtrl/Shift）。Import時にも対象managerで存在を確認し、未知のunitを含む一括Importは拒否します。元設定は`.yaml.bak`へ保存します。
 設定の手編集はCore再起動後に反映します。稼働中に手編集した設定はImportで上書きしません。
@@ -129,6 +129,14 @@ Scan / Importは要求時のみサービスを列挙し、選択した行のunit
 system unitの操作ではD-Busのinteractive authorizationを許可し、systemd/Polkitに認可を委譲します。
 デスクトップのPolkitエージェントと適切な権限が必要です。認可できなければ理由を表示し、GUIをrootで起動したり独自の昇格デーモンを使ったりはしません。
 journalログも現在ユーザーの閲覧権限の範囲になります。
+
+## Lifecycle・内部観測・承認（main）
+
+`backend`は親WorkloadのStart/Stop/Restartの委譲先です。systemd管理コンテナには`observer.docker`を指定し、Lifecycleはsystemd、内部プロセスとHealthはDocker APIで扱えます。従来のDocker直接管理と、ホストのROS Bridge設定も維持します。`controller`は内部Supervisor/Bridge専用で、親Lifecycleとは別です。
+
+GUIはExecution、Readiness / Health、Lifecycle Controller、Internal Observer / Child Controllerを分けて表示します。GroupのProgressでは完了・承認待ち・次のStepを確認でき、Manual GateのContinueは開発者の続行許可として扱います。観測不能や未実行をReady/完了とは表示しません。
+
+[systemd + Dockerの設定例](examples/systemd-docker.yaml)と[責務分担・Ready委譲方針・制約](docs/lifecycle-observer-gates.md)を参照してください。この追加機能は現在のmainに含まれ、既存のv0.2.1タグは変更しません。タグは大きなリリース時に付けます。
 
 ## 自己管理の防止
 
@@ -141,6 +149,7 @@ Core自体の再起動は`systemctl --user restart devdash-core.service`等で�
 - `devdash/model.py`: YAML検証、Group展開、安定したWorkload参照。
 - `devdash/engine.py`: asyncioによる順序付きSteps、Gate、Cancel、承認永続化、観測イベント。
 - `devdash/inspection.py`: systemd依存関係の純粋な診断。実行順序を決定するDAGではありません。
+- `devdash/presentation.py`: GUI非依存の責務表示・Group進捗の整形。
 - `devdash/adapters/`: D-Bus、Docker Engine API、既存Supervisorへの操作委譲。
 - `devdash/ipc.py`: ローカルUnix SocketとCoreプロセス。
 - `devdash/gui.py`: ttkbootstrap/Tkinterクライアント。IPCはGUIスレッド外で実行します。
@@ -174,7 +183,7 @@ uv run ruff check devdash tests/python
 uv run ruff format --check devdash tests/python
 ```
 
-Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性の追加分も含め、パラメーター化した189テストを検証しています。
+Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性・Lifecycle/Observer分離の追加分も含め、パラメーター化した218テストを検証しています。
 専用D-Busの返信順序・切断・再接続、実user unit、専用Docker、Tkinter GUI、別CoreプロセスのIPCを含みます。
 常駐運用の追加テストにはCoreのSIGTERM/SIGKILL、GUIの通信断復旧、旧/非互換IPC、配布unitでの自動再起動とWorkloadのPID維持を含みます。
 対応表と移植中に見つかった不具合、テストの書きやすさの比較は[テスト復元記録](docs/test-restoration.md)を参照してください。

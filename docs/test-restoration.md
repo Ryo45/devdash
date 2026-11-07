@@ -1,6 +1,6 @@
 # Rust版テストのPython移植と書きやすさ
 
-この文書はテスト復元時（118ケース）の記録です。その後、[常駐運用・互換性](resident-operation.md)と[自己管理防止](self-protection.md)のテストを追加し、現在は自己管理防止も含め189ケースです。
+この文書はテスト復元時（118ケース）の記録です。その後、[常駐運用・互換性](resident-operation.md)と[自己管理防止](self-protection.md)のテストを追加し、[Lifecycle/Observer分離](lifecycle-observer-gates.md)も含め、現在は218ケースです。
 
 比較元はRust版 `35ecdea`（`archive/rust-gpui`）です。`tests/*.rs`と`src/docker.rs`・`src/systemd_events.rs`内のテスト、合計65本を照合しました。
 Pythonでは1本のRustテストを複数の独立テストやパラメーターに分けているため、本数の一致は目標にしていません。

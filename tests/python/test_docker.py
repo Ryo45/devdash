@@ -166,3 +166,121 @@ async def test_supervisor_services_health_epochs_and_container_recreation():
     finally:
         await backend.close()
         await docker("rm", "-f", name)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("DEVDASH_DOCKER_TEST") != "1" or os.environ.get("DEVDASH_SYSTEMD_TEST") != "1",
+    reason="requires both dedicated Docker fixture and user manager",
+)
+async def test_systemd_managed_container_observation_and_child_control(monkeypatch):
+    """Only a unique temporary unit/container; no host service configuration changes."""
+    import shutil
+    from pathlib import Path
+
+    from devdash.adapters.docker import DockerAPI
+
+    name = "devdash-py-it-" + uuid.uuid4().hex[:10]
+    docker_path = shutil.which("docker")
+    unit = name + ".service"
+    runtime = Path(os.environ["XDG_RUNTIME_DIR"]) / "systemd/user"
+    runtime.mkdir(parents=True, exist_ok=True)
+    path = runtime / unit
+    config = Config(
+        {
+            "workloads": {
+                "robot": {
+                    "backend": "systemd",
+                    "unit": unit,
+                    "observer": {"docker": {"container": name}},
+                    "controller": {"kind": "supervisord", "socket": "/tmp/devdash-supervisor.sock"},
+                }
+            },
+            "groups": {
+                "robot": {
+                    "steps": [{"workload": "robot"}, {"gate": "health"}, {"gate": "continue"}]
+                }
+            },
+            "gates": {
+                "health": {
+                    "type": "container_ready",
+                    "workload": "robot",
+                    "timeout_ms": 20000,
+                    "interval_ms": 100,
+                },
+                "continue": {"type": "manual"},
+            },
+        }
+    )
+    backend = Backends(config)
+    engine = Engine(config, backend)
+    work = config.workloads["robot"]
+
+    async def docker(*args):
+        proc = await asyncio.create_subprocess_exec(
+            docker_path, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        output, error = await asyncio.wait_for(proc.communicate(), 30)
+        assert proc.returncode == 0, error.decode()
+        return output.decode().strip()
+
+    async def forbidden(*args):
+        raise AssertionError("Systemd Workload must not issue Docker Lifecycle calls")
+
+    monkeypatch.setattr(DockerAPI, "operate", forbidden)
+    await docker(
+        "create",
+        "--name",
+        name,
+        "--network",
+        "none",
+        "--memory",
+        "512m",
+        os.environ.get("DEVDASH_TEST_IMAGE", "devdash-supervisor-test:4.3.0"),
+    )
+    try:
+        path.write_text(
+            "[Unit]\nDescription=devdash isolated container observer fixture\n[Service]\nType=exec\n"
+            f"ExecStart={docker_path} start --attach {name}\n"
+            f"ExecStop={docker_path} stop --time 2 {name}\nTimeoutStopSec=10\n"
+        )
+        await backend.start()
+        await backend.systemd.session("user").call("Reload")
+        engine.launch("robot", True, "start")
+        await until(
+            lambda: engine.run["waiting_gate"] == "continue" or engine.run["status"] == "failed",
+            timeout=25,
+        )
+        assert engine.run["waiting_gate"] == "continue", engine.run
+        value = await backend.observe(work)
+        assert value["state"] == "active" and value["internal"]["state"] == "active"
+        assert value["health"] == "healthy" and value["readiness"]["state"] == "ready"
+        engine.approve("continue")
+        assert (await engine.wait())["status"] == "completed"
+        worker = next(c for c in value["children"] if c["id"] == "worker:worker")
+        await backend.operate_child(work, worker["id"], worker["epoch"], "stop")
+        value = await backend.observe(work)
+        assert value["state"] == "active" and value["health"] == "healthy"
+        assert next(c for c in value["children"] if c["id"] == worker["id"])["state"] == "STOPPED"
+        # Losing/restarting Core does not send a lifecycle operation to either manager.
+        await backend.close()
+        backend = Backends(config)
+        await backend.start()
+        value = await backend.observe(work)
+        assert value["state"] == "active" and value["internal"]["state"] == "active"
+        await backend.operate(work, "stop")
+        value = await backend.observe(work)
+        assert value["state"] == "inactive" and value["internal"]["state"] == "inactive"
+        assert value["readiness"]["state"] == "not_ready"
+    finally:
+        if engine.busy:
+            engine.task.cancel()
+            await asyncio.gather(engine.task, return_exceptions=True)
+        # External cleanup belongs only to this temporary test unit.
+        proc = await asyncio.create_subprocess_exec("systemctl", "--user", "stop", unit)
+        await proc.wait()
+        path.unlink(missing_ok=True)
+        proc = await asyncio.create_subprocess_exec("systemctl", "--user", "daemon-reload")
+        await proc.wait()
+        await backend.close()
+        await docker("rm", "-f", name)

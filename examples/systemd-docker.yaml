@@ -1,0 +1,33 @@
+# Lifecycle stays with this existing systemd unit. devdash never generates or edits it.
+workloads:
+  robot_container:
+    name: Robot container
+    backend: systemd
+    scope: system
+    unit: robot-container.service
+    observer:
+      docker:
+        compose: {project: robot, service: robot}
+        # Or: container: robot-dev (choose exactly one selector)
+        socket: /var/run/docker.sock
+    # Optional: this controls internal services, never the container Lifecycle.
+    controller:
+      kind: supervisord
+      socket: /run/supervisor.sock
+
+groups:
+  robot:
+    steps:
+      - workload: robot_container
+      # Compatibility readiness Gate. Prefer startup readiness owned by the unit.
+      - gate: container_health
+      - gate: operator_continue
+
+gates:
+  container_health:
+    type: container_ready
+    workload: robot_container
+    timeout_ms: 30000
+    interval_ms: 500
+  operator_continue:
+    type: manual

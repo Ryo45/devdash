@@ -174,3 +174,67 @@ def test_gui_reconnect_version_mismatch_and_close_at_gate(config, tmp_path, monk
     finally:
         window.close()
         peer.close()
+
+
+def test_gui_displays_lifecycle_health_and_observer_loss_separately(config, tmp_path):
+    from devdash.gui import Window
+    from devdash.model import Config, observation, readiness
+
+    raw = config.json()
+    raw["workloads"]["detector"]["observer"] = {"docker": {"container": "detector-container"}}
+    raw["workloads"]["detector"]["controller"] = {
+        "kind": "supervisord",
+        "socket": "/run/supervisor.sock",
+    }
+    peer = CorePeer(Config(raw), tmp_path / "core.sock")
+
+    async def publish(value):
+        peer.backend.observations["detector"] = value
+        await peer.engine.poll()
+
+    def fact(available=True):
+        return observation(
+            state="active",
+            health="unhealthy" if available else None,
+            readiness=readiness("not_ready", "docker health", "unhealthy")
+            if available
+            else readiness(),
+            internal=observation(state="active" if available else "unknown"),
+            observer_error=None if available else "Docker disconnected",
+        )
+
+    peer.run(publish(fact()))
+    window = Window(peer.socket)
+
+    def wait(predicate):
+        deadline = time.monotonic() + 6
+        while not predicate():
+            assert time.monotonic() < deadline, window.status.cget("text")
+            window.update()
+            time.sleep(0.01)
+
+    try:
+        wait(lambda: window.connected)
+        iid = json.dumps(["workload", "detector"])
+        window.tree.selection_set(iid)
+        window.tree.event_generate("<<TreeviewSelect>>")
+        window.update()
+        summary = window.summary.cget("text")
+        assert "Execution: active" in summary and "Health: unhealthy" in summary
+        assert "Lifecycle Controller: systemd" in summary
+        assert "Internal Observer: Docker API" in summary and "supervisord (container)" in summary
+        assert window.tree.item(iid, "values") == ("active", "not_ready")
+        assert window.buttons["start"].cget("text") == "Start (systemd)"
+        assert window.approve.instate(["disabled"])
+        peer.run(publish(fact(False)))
+        wait(lambda: "Docker disconnected" in window.summary.cget("text"))
+        assert window.tree.item(iid, "values") == ("active", "unknown")
+        assert "Health: unknown" in window.summary.cget("text")
+        peer.run(publish(fact()))
+        wait(lambda: "Health: unhealthy" in window.summary.cget("text"))
+        window.buttons["start"].invoke()
+        wait(lambda: window.snapshot["run"]["status"] == "completed")
+        assert peer.backend.calls == [("detector", "start")]
+    finally:
+        window.close()
+        peer.close()

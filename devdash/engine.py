@@ -36,7 +36,16 @@ class Engine:
         self.cancel = asyncio.Event()
         self.changed = asyncio.Event()
         self.task: asyncio.Task | None = None
-        self.run = dict(target="", status="", progress=[], waiting_gate=None, error=None)
+        self.run = dict(
+            target="",
+            status="",
+            action="",
+            group=False,
+            plan=[],
+            progress=[],
+            waiting_gate=None,
+            error=None,
+        )
         self.events = deque(maxlen=200)
         self.sequence = 0
         self.observations: dict[str, dict] = {}
@@ -130,7 +139,7 @@ class Engine:
             raise ValueError("Invalid operation; Reinitialize requires a Group")
         if target not in (self.config.groups if group else self.config.workloads):
             raise ValueError("Unknown operation target")
-        self._launch(target, action, lambda: self.execute(target, group, action))
+        self._launch(target, action, lambda: self.execute(target, group, action), group=group)
 
     def launch_child(self, parent, child, epoch, action):
         if parent not in self.config.workloads or action not in ACTIONS - {"reinitialize"}:
@@ -146,12 +155,21 @@ class Engine:
 
         self._launch(f"{parent}/{child}", action, operation)
 
-    def _launch(self, target, action, operation):
+    def _launch(self, target, action, operation, group=False):
         if self.busy:
             raise ValueError("Another operation is running")
         self.cancel = asyncio.Event()
         self.started, self.finished = time.monotonic(), 0.0
-        self.run = dict(target=target, status="running", progress=[], waiting_gate=None, error=None)
+        self.run = dict(
+            target=target,
+            status="running",
+            action=action,
+            group=group,
+            plan=[],
+            progress=[],
+            waiting_gate=None,
+            error=None,
+        )
 
         async def run():
             try:
@@ -172,8 +190,8 @@ class Engine:
             await self.task
         return copy.deepcopy(self.run)
 
-    async def track(self, label, action, operation, gate=False):
-        progress = dict(step=label, action=action, status="running", error=None)
+    async def track(self, label, action, operation, gate=False, kind=None):
+        progress = dict(step=label, kind=kind, action=action, status="running", error=None)
         self.run["progress"].append(progress)
         try:
             result = await operation
@@ -192,6 +210,9 @@ class Engine:
             for step in (
                 self.config.expand(target, phase == "stop") if group else [Step("workload", target)]
             )
+        ]
+        self.run["plan"] = [
+            dict(step=step.label, action=phase, kind=step.kind) for phase, step in plan
         ]
         scopes = {
             self.config.workloads[key]["scope"]
@@ -227,12 +248,18 @@ class Engine:
                 )
             if failure or self.cancel.is_set() or phase == "stop" and step.kind == "gate":
                 self.run["progress"].append(
-                    dict(step=step.label, action=phase, status="skipped", error=None)
+                    dict(
+                        step=step.label, kind=step.kind, action=phase, status="skipped", error=None
+                    )
                 )
                 continue
             try:
                 await self.track(
-                    step.label, phase, self.run_step(step, phase, leases), gate=step.kind == "gate"
+                    step.label,
+                    phase,
+                    self.run_step(step, phase, leases),
+                    gate=step.kind == "gate",
+                    kind=step.kind,
                 )
             except Exception as error:
                 failure = error
@@ -249,7 +276,7 @@ class Engine:
             return await workload(str(step.value))
         if step.kind == "parallel":
             results = await asyncio.gather(
-                *(self.track(key, action, workload(key)) for key in step.value),
+                *(self.track(key, action, workload(key), kind="workload") for key in step.value),
                 return_exceptions=True,
             )
             errors = [str(result) for result in results if isinstance(result, BaseException)]
@@ -357,6 +384,37 @@ class Engine:
             )
         )
 
+    def update_observer(self, key, old, now):
+        """Internal observation gaps do not reset the Lifecycle baseline."""
+        if not old:
+            return False
+        previous = old.get("observer_error") or old.get("children_error")
+        error = now.get("observer_error") or now.get("children_error")
+        if error and not previous:
+            self.emit("warning", f"Internal observation unavailable: {error}", key, "observer_lost")
+        elif previous and not error:
+            self.emit(
+                "info",
+                "Internal observation restored; new baseline; intermediate transitions unknown",
+                key,
+                "observer_restored",
+            )
+        elif not error:
+            before, after = old.get("internal") or {}, now.get("internal") or {}
+            if old.get("health") != now.get("health") or any(
+                before.get(field) != after.get(field)
+                for field in ("state", "canonical_unit", "invocation_id")
+            ):
+                self.emit(
+                    "warning"
+                    if now.get("health") == "unhealthy" or after.get("state") == "not_found"
+                    else "info",
+                    f"Internal observation changed: state={after.get('state', now['state'])}, health={now.get('health')}; no repair requested",
+                    key,
+                    "observer_changed",
+                )
+        return not previous and not error
+
     def update(self, current):
         baseline = not self.known and not self.observations
         for key, now in current.items():
@@ -415,7 +473,10 @@ class Engine:
                     key,
                     "state_changed",
                 )
-            if old and not restored and not generation:
+            observer_continuous = not (restored or generation) and self.update_observer(
+                key, old, now
+            )
+            if old and not restored and not generation and observer_continuous:
                 prior = {child["id"]: child for child in old["children"]}
                 for child in now["children"]:
                     previous = prior.get(child["id"])

@@ -63,6 +63,37 @@ class Step:
         return {self.kind: list(self.value) if self.kind == "parallel" else self.value}
 
 
+def validate_docker(value, key):
+    docker = fields(value, {"socket", "container", "compose"}, f"Docker {key}")
+    docker.setdefault("socket", "/var/run/docker.sock")
+    require(
+        isinstance(docker["socket"], str) and Path(docker["socket"]).is_absolute(),
+        f"Docker socket must be absolute: {key}",
+    )
+    require(
+        bool(docker.get("container")) != bool(docker.get("compose")),
+        f"Choose one Docker selector: {key}",
+    )
+    if docker.get("compose"):
+        compose = fields(docker["compose"], {"project", "service"}, "Compose selector")
+        require(
+            all(isinstance(compose.get(n), str) and compose[n] for n in ("project", "service")),
+            "Missing Compose project/service",
+        )
+        selector = (compose["project"], compose["service"])
+    else:
+        name = docker["container"]
+        require(
+            isinstance(name, str)
+            and name
+            and "/" not in name
+            and not any(c.isspace() for c in name),
+            "Invalid container name",
+        )
+        selector = name
+    return (docker["socket"], selector)
+
+
 class Config:
     def __init__(self, raw: dict):
         raw = copy.deepcopy(fields(raw, {"workloads", "groups", "gates"}, "config"))
@@ -80,7 +111,7 @@ class Config:
         for key, work in self.workloads.items():
             fields(
                 work,
-                {"name", "backend", "scope", "unit", "docker", "controller"},
+                {"name", "backend", "scope", "unit", "docker", "controller", "observer"},
                 f"workload {key}",
             )
             work.setdefault("name", "")
@@ -105,41 +136,17 @@ class Config:
                     not work["unit"] and work["scope"] == "user",
                     f"Docker {key} does not use unit/scope",
                 )
-                docker = fields(
-                    work.get("docker"), {"socket", "container", "compose"}, f"Docker {key}"
-                )
-                docker.setdefault("socket", "/var/run/docker.sock")
-                require(
-                    isinstance(docker["socket"], str) and Path(docker["socket"]).is_absolute(),
-                    f"Docker socket must be absolute: {key}",
-                )
-                require(
-                    bool(docker.get("container")) != bool(docker.get("compose")),
-                    f"Choose one Docker selector: {key}",
-                )
-                if docker.get("compose"):
-                    compose = fields(docker["compose"], {"project", "service"}, "Compose selector")
-                    require(
-                        all(
-                            isinstance(compose.get(n), str) and compose[n]
-                            for n in ("project", "service")
-                        ),
-                        "Missing Compose project/service",
-                    )
-                    selector = (compose["project"], compose["service"])
-                else:
-                    name = docker["container"]
-                    require(
-                        isinstance(name, str)
-                        and name
-                        and "/" not in name
-                        and not any(c.isspace() for c in name),
-                        "Invalid container name",
-                    )
-                    selector = name
-                identity = ("docker", docker["socket"], selector)
+                identity = ("docker", *validate_docker(work.get("docker"), key))
             else:
                 raise ConfigError(f"Unsupported backend for {key}")
+            if "observer" in work:
+                require(
+                    work["backend"] == "systemd", "Docker workloads already have a Docker observer"
+                )
+                observer = fields(work["observer"], {"docker"}, f"Observer {key}")
+                observed_identity = ("docker", *validate_docker(observer.get("docker"), key))
+                require(observed_identity not in references, f"Duplicate Docker ownership: {key}")
+                references.add(observed_identity)
             require(identity not in references, f"Duplicate backend reference: {key}")
             references.add(identity)
             if work.get("controller"):
@@ -230,7 +237,7 @@ class Config:
             elif kind == "container_ready":
                 require(
                     isinstance(gate.get("workload"), str)
-                    and self.workloads.get(gate["workload"], {}).get("backend") == "docker",
+                    and docker_reference(self.workloads.get(gate["workload"], {})) is not None,
                     f"Invalid container readiness reference {key}",
                 )
 
@@ -308,6 +315,19 @@ def systemd_key(workload: dict) -> UnitKey | None:
     )
 
 
+def docker_reference(work: dict) -> dict | None:
+    """Internal observation selector; never selects a Lifecycle operation path."""
+    return (
+        work.get("docker")
+        if work.get("backend") == "docker"
+        else work.get("observer", {}).get("docker")
+    )
+
+
+def readiness(state="unknown", source="unavailable", detail="Not observed") -> dict:
+    return dict(state=state, source=source, detail=detail)
+
+
 def observation(**values: Any) -> dict:
     result = dict(
         state="unknown",
@@ -319,6 +339,9 @@ def observation(**values: Any) -> dict:
         invocation_id=None,
         manager_generation=None,
         health=None,
+        readiness=readiness(),
+        internal=None,
+        observer_error=None,
         children=[],
         children_error=None,
         controller=None,

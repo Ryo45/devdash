@@ -13,7 +13,7 @@ from dbus_fast import BusType, Message, MessageFlag, MessageType, Variant
 from dbus_fast.aio import MessageBus
 
 from ..inspection import PROPERTIES, Graph
-from ..model import UnitKey, observation
+from ..model import UnitKey, observation, readiness
 from ..self_protection import application_unit, reject_application_service, reject_application_unit
 
 SERVICE = "org.freedesktop.systemd1"
@@ -491,6 +491,15 @@ class Systemd:
             pid=service.get("MainPID") or None,
             cpu_nsec=valid(service.get("CPUUsageNSec")),
             memory_bytes=valid(service.get("MemoryCurrent")),
+            readiness=readiness(
+                "ready" if props.get("ActiveState") == "active" else "not_ready",
+                "systemd notify",
+                "Type=" + service["Type"] + "; manager startup completion, not continuous health",
+            )
+            if service.get("Type") in ("notify", "notify-reload")
+            else readiness(
+                detail="systemd startup job completion does not establish application readiness"
+            ),
         )
 
     async def validate_registration(self, work):

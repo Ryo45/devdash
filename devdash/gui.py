@@ -17,6 +17,7 @@ import ttkbootstrap as ttk
 
 from . import __version__
 from .ipc import OutcomeUnknown, default_socket, request
+from .presentation import group_progress, workload_summary
 from .protocol import MUTATIONS, CompatibilityError, check_core
 
 
@@ -65,10 +66,12 @@ class Window(ttk.Window):
         left = ttk.Frame(split)
         split.add(left, weight=1)
         self.tree = ttk.Treeview(
-            left, columns=("state",), selectmode="browse", show="tree headings"
+            left, columns=("state", "readiness"), selectmode="browse", show="tree headings"
         )
         self.tree.heading("#0", text="Group / Workload")
-        self.tree.heading("state", text="State")
+        self.tree.heading("state", text="Execution")
+        self.tree.heading("readiness", text="Readiness")
+        self.tree.column("readiness", width=95, minwidth=75, stretch=False)
         self.tree.column("#0", width=250, minwidth=170)
         self.tree.column("state", width=100, minwidth=80, stretch=False)
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
@@ -92,7 +95,7 @@ class Window(ttk.Window):
             button.pack(side="left", padx=(0, 5))
             self.buttons[action] = button
         self.approve = ttk.Button(
-            operations, text="Approve Gate", bootstyle="success", command=self.approve_gate
+            operations, text="Continue · approval", bootstyle="success", command=self.approve_gate
         )
         self.approve.pack(side="left", padx=(0, 5))
         self.cancel = ttk.Button(
@@ -102,6 +105,8 @@ class Window(ttk.Window):
             command=lambda: self.send({"command": "cancel"}, self.render),
         )
         self.cancel.pack(side="left")
+        self.summary = ttk.Label(right, text="", wraplength=730, justify="left")
+        self.summary.pack(fill="x", pady=(10, 0))
         self.run = ttk.Label(right, text="", wraplength=730)
         self.run.pack(fill="x", pady=10)
         self.tabs = ttk.Notebook(right)
@@ -153,7 +158,7 @@ class Window(ttk.Window):
         for iid in self.identities:
             values = self.tree.item(iid, "values")
             if values and values[0] and not values[0].endswith(" (stale)"):
-                self.tree.item(iid, values=(values[0] + " (stale)",))
+                self.tree.item(iid, values=(values[0] + " (stale)", "unknown (stale)"))
         self.selected()
 
     def tick(self):
@@ -217,15 +222,15 @@ class Window(ttk.Window):
         identities = {}
         referenced = set()
 
-        def node(parent, label, identity, state=""):
+        def node(parent, label, identity, state="", readiness=""):
             iid = json.dumps(identity, ensure_ascii=False)
             identities[iid] = identity
             if self.tree.exists(iid):
-                self.tree.item(iid, text=label, values=(state,))
+                self.tree.item(iid, text=label, values=(state, readiness))
                 self.tree.move(iid, parent, "end")
             else:
                 self.tree.insert(
-                    parent, "end", iid=iid, text=label, values=(state,), open=first_render
+                    parent, "end", iid=iid, text=label, values=(state, readiness), open=first_render
                 )
             return iid
 
@@ -236,7 +241,11 @@ class Window(ttk.Window):
             scope = work["scope"] if work["backend"] == "systemd" else "docker"
             label = work.get("name") or key
             item = node(
-                parent, f"{label} [{scope}]", ["workload", key], obs.get("state", "unknown")
+                parent,
+                f"{label} [{scope}]",
+                ["workload", key],
+                obs.get("state", "unknown"),
+                obs.get("readiness", {}).get("state", "unknown"),
             )
             child_items = {}
             for child in obs.get("children", []):
@@ -276,7 +285,12 @@ class Window(ttk.Window):
                         if gate["type"] == "manual"
                         else "check on start"
                     )
-                    node(item, f"Gate: {ref}", ["gate", ref], state)
+                    node(
+                        item,
+                        f"{'Approval' if gate['type'] == 'manual' else 'Readiness check'}: {ref}",
+                        ["gate", ref],
+                        state,
+                    )
 
         children = {
             step["group"]
@@ -302,10 +316,24 @@ class Window(ttk.Window):
                 self.tree.selection_remove(*self.tree.selection())
                 self.selection = None  # Never fall back to parent after an epoch change.
         run = value["run"]
+        gate = run["waiting_gate"]
+        waiting = ""
+        if gate:
+            waiting = (
+                (
+                    "Developer Continue"
+                    if config["gates"][gate]["type"] == "manual"
+                    else "Readiness check"
+                )
+                + ": "
+                + gate
+            )
         self.run.configure(
-            text=f"{run['target']} {run['status']} · Gate: {run['waiting_gate'] or '—'}\n{run.get('error') or ''}"
+            text=f"Operation: {run['target']} {run['status']} · {waiting}\n{run.get('error') or ''}"
+            if run["status"]
+            else "No operation has run in this Core instance"
         )
-        set_text(self.texts["Progress"], json.dumps(run["progress"], indent=2))
+
         set_text(
             self.texts["Events"],
             "\n".join(
@@ -359,10 +387,42 @@ class Window(ttk.Window):
             actions = details.get("actions", [])
         elif value and kind == "gate":
             details = value["config"]["gates"][key]
+        summary = ""
+        progress = "Select a Group to see sequence order and progress."
+        if value and kind == "workload":
+            summary = workload_summary(
+                value["config"]["workloads"][key],
+                value["observations"].get(key, {}),
+                self.connected,
+            )
+        elif value and kind == "group":
+            summary = "Group sequence: Start forwards · Stop backwards · Restart stops then starts.\nManual Gate Continue permits sequence progress; it is not service readiness."
+            progress = group_progress(value, key)
+            if not self.connected:
+                progress = "STALE: Core disconnected; sequence outcome may be unknown\n" + progress
+        elif value and kind == "gate":
+            manual = details["type"] == "manual"
+            summary = (
+                (
+                    "Developer approval: "
+                    + ("approved" if key in value["approved"] else "not approved")
+                    + "; Continue permits Group progress. It does not start a service or certify readiness."
+                )
+                if manual
+                else "Readiness check: evaluated during Group Start; no developer approval."
+            )
+        elif value and kind == "child":
+            summary = "Internal child: operations go to its Child Controller. Parent Lifecycle is separate."
+        self.summary.configure(text=summary)
+        set_text(self.texts["Progress"], progress)
         set_text(self.texts["Details"], json.dumps(details, indent=2, ensure_ascii=False))
+        destination = {"group": "Group", "child": "child"}.get(kind, "Lifecycle")
+        if value and kind == "workload":
+            destination = value["config"]["workloads"][key]["backend"]
         for action, button in self.buttons.items():
             button.configure(
-                state="normal" if self.connected and not busy and action in actions else "disabled"
+                text=f"{action.capitalize()} ({destination})",
+                state="normal" if self.connected and not busy and action in actions else "disabled",
             )
         gate = value["run"]["waiting_gate"] if value else None
         manual_wait = bool(gate and value["config"]["gates"][gate]["type"] == "manual")
@@ -370,7 +430,8 @@ class Window(ttk.Window):
             value and kind == "gate" and value["config"]["gates"][key]["type"] == "manual"
         )
         self.approve.configure(
-            state="normal" if self.connected and (manual_wait or manual_selected) else "disabled"
+            text=f"Continue · {gate if manual_wait else key if manual_selected else 'approval'}",
+            state="normal" if self.connected and (manual_wait or manual_selected) else "disabled",
         )
         self.cancel.configure(
             state="normal"
