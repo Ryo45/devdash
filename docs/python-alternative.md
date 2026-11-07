@@ -1,5 +1,7 @@
 # Python版の実験・検証記録
 
+現在のGUIはライセンス構成を変更するため、Qtからttkbootstrap + Tkinterへ移行しています。詳細は[GUI移行記録](gui-toolkit.md)を参照してください。
+
 ## 分離方法
 
 `experiment/python-only`はRust版mainの`35ecdea`から分岐しています。
@@ -10,17 +12,17 @@ Rust版のコミットは`archive/rust-gpui`ブランチへ保存しています
 
 | 用途 | Python版 |
 | --- | --- |
-| ネイティブGUI | PySide6-Essentials 6.10.3 / Qt Widgets |
+| ネイティブGUI | ttkbootstrap 2.2.7 / Tkinter |
 | ヘッドレスCore | asyncio、別プロセス |
 | systemd | dbus-fast 5.0.22、user/sessionとsystem busを区別 |
 | HTTP/Docker | aiohttp、UnixConnector、Engine API 1.41〜1.52 |
 | 設定 | PyYAML SafeLoader、重複キー・参照・配置・循環検証 |
-| 依存固定 | uv.lock。Qt Addons/WebEngineは導入しない |
+| 依存固定 | uv.lock。PySide6/shiboken6は除外 |
 | ROS連携 | 既存Python Bridgeを再利用 |
 
-GUIは標準的なTree/Button/Tab/Text部品で構成しました。GPUI版より試作・GUI操作テストを短いコードで書けます。
-一方、今回のGUIはデザインや大量行表示を比較するものではなく、QtのLGPLを含む配布条件の検討も必要です。
-Core/IPCにQt依存はありません。ランタイムの子要素をGroupのStepsへ入れることもしていません。
+GUIはTreeview/Button/Notebook/Text部品で構成し、ttkbootstrapでテーマを適用しています。
+初期のPython試作にはQtを使いましたが、配布時のライセンス構成を変更するためTkinterへ置き換えました。
+Core/IPCにGUIライブラリ依存はありません。ランタイムの子要素をGroupのStepsへ入れることもしていません。
 
 ## Stepsと責務の境界
 
@@ -66,24 +68,24 @@ systemdトランザクションの完全な予測・模倣は行わず、警告�
 - D-Busプロトコル: 完了通知の返信前後両方、失敗ジョブ、異なるowner拒否、owner喪失、interactive authorizationと認可エラー。
 - 実user manager: 専用ダミーunitの起動・承認・部分Restart・全体Restart・Cancel、別クライアントのStop観測、Reloadによる診断無効化。
 - Docker: 専用supervisord fixtureの論理サービス停止/起動、停止サービスのID保持、PID観測専用、Healthと子状態の分離、古いコンテナ世代の操作拒否。
-- GUI: 実Qtボタン→Unix Socket→CoreでStart、Gate承認、部分Restart、Reinitialize、Cancel、ログ表示。BackendはFakeを使用。
+- GUI: Tkinterボタン→Unix Socket→CoreでStart、Gate承認、部分Restart、Reinitialize、Cancel、ログ表示、system/userのScanとImport。BackendはFakeを使用。
 - 別Coreプロセス: クライアント切断後のGate維持、承認保存、Core再起動後に操作を再開しない、CLI通信、0700/0600。
 
 user/system双方への実接続とScanも手動確認しました。system unitの実操作やPolkit対話は行っていません。
 このブランチでROS実機テストを新しく通したという意味ではありません。再利用Bridgeの既存Jazzyテストと、アプリ接続の追加検証は区別してください。
 
-参考計測: GUI用venvは約277 MiB（pytest等の開発依存を含む）。Qtウィンドウをoffscreenで生成し最初のイベントを処理するまで181.3 ms、プロセス最大RSS 92.6 MiBでした。
+移行前のQt版の参考計測: GUI用venvは約277 MiB（pytest等の開発依存を含む）。Qtウィンドウをoffscreenで生成し最初のイベントを処理するまで181.3 ms、プロセス最大RSS 92.6 MiBでした。
 単発のローカル計測で、Core起動・D-Bus接続・画面全体の描画時間を含むベンチマークではありません。Rust版との性能優劣を示す値にはしていません。
 
 ## 現段階の制限・次に比較したいこと
 
 - GUIの詳細・診断はJSON中心です。日本語化、診断表、ログ追尾、選択保持と大量更新の使い勝手は改善余地があります。
-- Scan/Importは実装済みですがGUI自動テストは操作/承認を中心とし、Importダイアログ全体は未網羅です。
+- Scan/ImportはGUIテストで確認済みです。状態更新中の全操作組み合わせや大量候補表示は未網羅です。
 - 監視状態は1秒ポーリングです。PropertiesChangedの選択購読やBridge watchの利用は後続候補です。
 - 通常のROS launch ActionはStopだけです。Start/Restartは安全に成立しないため、既存Bridgeと同じく非対応です。
 - システムサービスのPolkit対話、Ubuntu 22.04、Wayland実画面、大規模構成、配布パッケージは未検証です。
-- core/GUIの実systemdを通した一体E2E、ROS AdapterとQt子要素のE2Eを加えると、Rust版との比較の確度が上がります。
-- Qt依存の配布条件を満たせるかも採用判断に含めます。単にコード量だけで置き換えを決めません。
+- core/GUIの実systemdを通した一体E2E、ROS AdapterとGUI子要素のE2Eを加えると、Rust版との比較の確度が上がります。
+- GUI依存のライセンス記録は`gui-toolkit.md`へ移しました。Qtは現在の依存に含めません。
 
 ## 調査資料
 
@@ -94,8 +96,8 @@ user/system双方への実接続とScanも手動確認しました。system unit
 
 ## 実装しやすさについての現時点の判断
 
-今の要件ではPython + PySide6のほうが素直です。Qtの標準ツリー・ボタン・テキスト部品、asyncio、ROSのPython APIをそのまま使えます。
-QtTestで実ボタンをクリックするGUIテストも書きやすく、画面座標への依存を避けられます。
+今の要件ではPythonのほうが素直です。Tkinterの標準ツリー・ボタン・テキスト部品、asyncio、ROSのPython APIをそのまま使えます。
+Tkinterのウィジェット操作によるGUIテストも画面座標への依存を避けて書けます。
 性能が支配的な用途より、Linuxの既存APIをつなぎ、運用ルールを分かりやすく表示する用途に合っています。
 
 ただしsystemdジョブ相関、manager喪失時の不明結果、依存関係の種類、世代をまたいだ操作拒否といった難しさは同じです。

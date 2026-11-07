@@ -1,4 +1,4 @@
-"""Real Qt clicks through IPC to an independent Core thread, with Fake Backend."""
+"""Real Tkinter controls through IPC to an independent Core thread, with Fake Backend."""
 
 import asyncio
 import os
@@ -11,20 +11,18 @@ pytestmark = [
     pytest.mark.gui,
     pytest.mark.skipif(
         os.environ.get("DEVDASH_GUI_TEST") != "1",
-        reason="set DEVDASH_GUI_TEST=1 and QT_QPA_PLATFORM=offscreen",
+        reason="set DEVDASH_GUI_TEST=1 and run with a display or xvfb-run",
     ),
 ]
 
 
 def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
-    pytest.importorskip("PySide6")
+    import json
+
     from conftest import Fake
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
 
     from devdash.engine import Engine
-    from devdash.gui import Window, apply_theme
+    from devdash.gui import Window
     from devdash.ipc import Server
 
     socket = tmp_path / "core.sock"
@@ -34,7 +32,13 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
     async def core():
         backend = Fake()
         engine = Engine(config, backend)
-        server = Server(engine, tmp_path / "config.yaml")
+        import yaml
+
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.safe_dump(config.json()))
+        backend.systemd = backend  # Import updates the adapter's config reference.
+        backend.config = config
+        server = Server(engine, path)
         listener = await asyncio.start_unix_server(server.handle, path=str(socket))
         state.update(
             loop=asyncio.get_running_loop(), engine=engine, backend=backend, stop=asyncio.Event()
@@ -52,36 +56,29 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
     thread = threading.Thread(target=lambda: asyncio.run(core()), daemon=True)
     thread.start()
     assert ready.wait(5)
-    app = QApplication.instance() or QApplication([])
-    apply_theme(app)
     window = Window(socket)
-    window.show()
+    callback_errors = []
+    window.report_callback_exception = lambda *args: callback_errors.append(args)
 
     def wait(predicate, timeout=5):
         deadline = time.monotonic() + timeout
         while not predicate():
-            assert time.monotonic() < deadline, window.status.text()
-            QTest.qWait(20)
-            app.processEvents()
+            assert time.monotonic() < deadline, window.error.cget("text")
+            window.update()
+            time.sleep(0.01)
 
     def select(identity):
-        def find(item):
-            if item.data(0, Qt.UserRole) == identity:
-                return item
-            for index in range(item.childCount()):
-                if found := find(item.child(index)):
-                    return found
-            return None
-
-        for index in range(window.tree.topLevelItemCount()):
-            if item := find(window.tree.topLevelItem(index)):
-                window.tree.setCurrentItem(item)
-                return
-        raise AssertionError(identity)
+        iid = json.dumps(identity, ensure_ascii=False)
+        assert window.tree.exists(iid), identity
+        window.tree.selection_set(iid)
+        window.tree.focus(iid)
+        window.tree.event_generate("<<TreeviewSelect>>")
+        window.update()
 
     def click(button):
-        assert button.isEnabled()
-        QTest.mouseClick(button, Qt.LeftButton)
+        assert not button.instate(["disabled"])
+        button.invoke()
+        window.update()
 
     try:
         wait(lambda: window.snapshot is not None)
@@ -89,7 +86,7 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
         click(window.buttons["start"])
         wait(lambda: window.snapshot["run"]["waiting_gate"] == "ready")
         assert len(state["backend"].calls) == 2
-        assert not window.buttons["restart"].isEnabled()
+        assert window.buttons["restart"].instate(["disabled"])
         click(window.approve)
         wait(lambda: window.snapshot["run"]["status"] == "completed")
         assert state["backend"].calls[-2:] == [("detector", "start"), ("planner", "start")]
@@ -112,8 +109,8 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
         assert any(step["status"] == "skipped" for step in window.snapshot["run"]["progress"])
         select(["workload", "detector"])
         window.logs()
-        wait(lambda: "fixture log" in window.texts["Logs"].toPlainText())
-        assert window.buttons["start"].isEnabled()
+        wait(lambda: "fixture log" in window.texts["Logs"].get("1.0", "end-1c"))
+        assert not window.buttons["start"].instate(["disabled"])
         click(window.buttons["start"])
         wait(
             lambda: (
@@ -123,9 +120,33 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
         )
         assert state["backend"].calls[-1] == ("detector", "start")
         assert "ready" not in window.snapshot["approved"]
-        screenshot = os.environ.get("DEVDASH_GUI_SCREENSHOT")
-        if screenshot:
-            assert window.grab().save(screenshot)
+        # Actual Scan/Import controls, including scope-change selection reset.
+        dialog = window.scan_dialog()
+        click(dialog.scan_button)
+        wait(lambda: bool(dialog.units.get_children()))
+        dialog.units.selection_set("importable.service")
+        dialog.scope.set("system")
+        dialog.scope.event_generate("<<ComboboxSelected>>")
+        window.update()
+        assert not dialog.units.get_children()
+        click(dialog.scan_button)
+        wait(lambda: bool(dialog.units.get_children()))
+        dialog.units.selection_set("importable.service")
+        click(dialog.import_button)
+        wait(lambda: "Imported:" in dialog.message.cget("text"))
+        wait(lambda: "importable" in window.snapshot["config"]["workloads"])
+        assert window.snapshot["config"]["workloads"]["importable"]["scope"] == "system"
+        assert (tmp_path / "config.yaml.bak").exists()
+        dialog.close()
+        assert not callback_errors, callback_errors
+        if screenshot := os.environ.get("DEVDASH_GUI_SCREENSHOT"):
+            from PIL import ImageGrab
+
+            window.update()
+            x, y = window.winfo_rootx(), window.winfo_rooty()
+            ImageGrab.grab(bbox=(x, y, x + window.winfo_width(), y + window.winfo_height())).save(
+                screenshot
+            )
     finally:
         window.close()
         state["loop"].call_soon_threadsafe(state["stop"].set)

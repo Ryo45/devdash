@@ -1,6 +1,6 @@
 # devdash
 
-**Python + PySide6 / Qt Widgets**製のLinux向けWorkloadダッシュボードです。
+**Python + ttkbootstrap / Tkinter**製のLinux向けWorkloadダッシュボードです。
 Python版を本流として開発します。以前のRust + GPUI版は[`archive/rust-gpui`](https://github.com/Ryo45/devdash/tree/archive/rust-gpui)に保存しています。アプリの実行・ビルドにRustツールチェーンは不要です。
 
 ![Python GUI](docs/python-gui.png)
@@ -25,9 +25,16 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[gui]'
 ```
 
-GUIにはディスプレイとQtのLinux実行時ライブラリが必要です。Qtの[X11要件](https://doc.qt.io/qt-6/linux-requirements.html)も参照してください。
-Qtはwheelで配布されるネイティブライブラリを利用します。「Python only」はアプリの実装言語のことで、依存ライブラリまで純Pythonという意味ではありません。
-ヘッドレスCoreだけならGUI依存を入れる必要はありません。
+GUIにはディスプレイとTkinterが必要です。Ubuntuでは、venvに使うシステムPythonに合わせて導入します。
+
+```bash
+sudo apt-get install -y python3-tk
+python3 -m tkinter
+```
+
+`python3 -m tkinter`で小さな確認用ウィンドウが開きます。uv管理の別Pythonを使う場合も、そのPythonがTkを利用できることを確認してください。
+UbuntuのシステムPythonを明示するなら`uv sync --locked --extra gui --group dev --python /usr/bin/python3`を使います。
+ヘッドレスCoreにはTkinterもGUI用依存も不要です。
 
 ## 起動
 
@@ -65,7 +72,7 @@ Cancelは未発行Stepをスキップし、発行済みsystemdジョブの結果
 
 GUIのツリーから対象を選択し、Start/Stop/Restartを押します。Manual Gate待機中にApprove Gateを押すと続行します。
 Detailsにmanager、状態、PID、観測値、子要素の操作能力を表示します。Progress/Diagnostics/Events/Logsで進捗・診断・状態変化・ログを確認できます。
-Scan / Importは要求時のみサービスを列挙し、選択したunit参照だけを設定へ追加します。元設定は`.yaml.bak`へ保存します。
+Scan / Importは要求時のみサービスを列挙し、選択した行のunit参照だけを設定へ追加します（複数選択はCtrl/Shift）。元設定は`.yaml.bak`へ保存します。
 設定の手編集はCore再起動後に反映します。稼働中に手編集した設定はImportで上書きしません。
 
 system unitの操作ではD-Busのinteractive authorizationを許可し、systemd/Polkitに認可を委譲します。
@@ -79,7 +86,7 @@ journalログも現在ユーザーの閲覧権限の範囲になります。
 - `devdash/inspection.py`: systemd依存関係の純粋な診断。実行順序を決定するDAGではありません。
 - `devdash/adapters/`: D-Bus、Docker Engine API、既存Supervisorへの操作委譲。
 - `devdash/ipc.py`: ローカルUnix SocketとCoreプロセス。
-- `devdash/gui.py`: Qt Widgetsクライアント。IPCはGUIスレッド外で実行します。
+- `devdash/gui.py`: ttkbootstrap/Tkinterクライアント。IPCはGUIスレッド外で実行します。
 - `bridges/roslaunch/`: 既存の独立したPython ROS 2 Bridgeを再利用。
 
 [D-Busイベント追跡・検査の制約と比較結果](docs/python-alternative.md)、[コンテナとROS連携](docs/container-processes-and-roslaunch.md)も参照してください。
@@ -88,9 +95,11 @@ journalログも現在ユーザーの閲覧権限の範囲になります。
 
 ```bash
 uv run pytest -q
-QT_QPA_PLATFORM=offscreen DEVDASH_GUI_TEST=1 uv run pytest -q tests/python/test_gui.py
+DEVDASH_GUI_TEST=1 uv run pytest -q tests/python/test_gui.py
 DEVDASH_SYSTEMD_TEST=1 uv run pytest -q tests/python/test_systemd.py
 ```
+
+GUIテストにはディスプレイが必要です。CIなどでは`xvfb`を導入し、`DEVDASH_GUI_TEST=1 xvfb-run -a uv run pytest -q tests/python/test_gui.py`で実行できます。
 
 systemdテストは実際のuser managerを使用し、一意な`devdash-py-it-*` runtime unitだけを作成・操作・削除します。
 既存の実サービスは操作しません。起動したシェル配下のsleepもsystemdのcontrol groupで終了します。
@@ -107,11 +116,10 @@ uv run ruff check devdash tests/python
 uv run ruff format --check devdash tests/python
 ```
 
-実systemd・専用Docker・Qt GUI・別プロセスIPCを含む34テストを検証済みです。
+実systemd・専用Docker・Tkinter GUI・別プロセスIPCを含む34テストを検証済みです。
 ROS 2 Jazzyの任意テストと制約は[Bridge README](bridges/roslaunch/README.md)を参照してください。
 
 ## ライセンス
 
-アプリ本体はMIT OR Apache-2.0です。Qt/PySide6はLGPLv3/GPLv3/商用ライセンスの選択肢を持つ別依存です。
-配布時には使用するライセンスの条件を確認してください。[Qt for Python](https://doc.qt.io/qtforpython-6/)を参照。
-GPUI版と比べ、依存ライセンスの構成が変わる点は採用判断に含めてください。
+アプリ本体はMIT OR Apache-2.0です。GUIはttkbootstrap 2.2.7、Pillow、Python標準のTkinterとOSのTcl/Tkを使用します。
+PySide6・shiboken6は依存から除きました。取得した配布物のライセンス表記と変更点は[GUIライブラリの記録](docs/gui-toolkit.md)を参照してください。
