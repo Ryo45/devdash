@@ -14,6 +14,8 @@ from pathlib import Path
 import stat
 import uuid
 
+from . import IPC_PROTOCOL, __version__, identity
+
 ACTIVE = ContextVar("devdash_launch_registry", default=None)
 
 @dataclass
@@ -71,7 +73,7 @@ class Registry:
         self.changed()
 
     def snapshot(self):
-        return {'epoch': self.epoch, 'sequence': self.sequence,
+        return {'bridge': identity(), 'epoch': self.epoch, 'sequence': self.sequence,
                 'children': [dict(p.child) for p in self.processes.values()] + (self.components.snapshot() if self.components is not None else [])}
 
     async def operate(self, request):
@@ -98,32 +100,37 @@ class Registry:
         return self.snapshot()
 
 async def reply(writer, data=None, error=None):
-    writer.write((json.dumps({'ok': error is None, 'data': data, 'error': error}) + '\n').encode())
+    writer.write((json.dumps({'ok': error is None, 'data': data, 'error': error, 'bridge': identity()}) + '\n').encode())
     await writer.drain()
 
 async def handle(registry, reader, writer):
     try:
-        raw = await asyncio.wait_for(reader.readline(), timeout=10)
-        request = json.loads(raw)
-        command = request.get('command')
-        if command == 'snapshot':
-            await reply(writer, registry.snapshot())
-        elif command == 'operate':
-            await reply(writer, await registry.operate(request))
-        elif command == 'watch':
-            # Watch is optional; clients can also poll snapshots. No history is
-            # invented after a disconnect; sequence + epoch detect the gap.
-            while True:
-                snapshot = registry.snapshot()
-                await reply(writer, snapshot)
-                async with registry.condition:
-                    try:
-                        await asyncio.wait_for(registry.condition.wait_for(
-                            lambda: registry.sequence != snapshot['sequence']), timeout=30)
-                    except asyncio.TimeoutError:
-                        pass
-        else:
-            raise ValueError('Unknown command')
+        for _ in range(2):
+            raw = await asyncio.wait_for(reader.readline(), timeout=10)
+            if not raw:
+                break
+            request = json.loads(raw)
+            command = request.get('command')
+            if command == 'snapshot':
+                await reply(writer, registry.snapshot())
+            elif command == 'operate':
+                if type(request.get('protocol')) is not int or request['protocol'] != IPC_PROTOCOL:
+                    raise ValueError(f'Bridge {__version__} requires IPC {IPC_PROTOCOL}; received {request.get("protocol", "missing")}')
+                await reply(writer, await registry.operate(request))
+            elif command == 'watch':
+                # Watch is optional; clients can also poll snapshots. No history is
+                # invented after a disconnect; sequence + epoch detect the gap.
+                while True:
+                    snapshot = registry.snapshot()
+                    await reply(writer, snapshot)
+                    async with registry.condition:
+                        try:
+                            await asyncio.wait_for(registry.condition.wait_for(
+                                lambda: registry.sequence != snapshot['sequence']), timeout=30)
+                        except asyncio.TimeoutError:
+                            pass
+            else:
+                raise ValueError('Unknown command')
     except (ConnectionError, asyncio.CancelledError):
         pass
     except Exception as error:
@@ -182,6 +189,7 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version', action='version', version=f'devdash-roslaunch {__version__} (IPC {IPC_PROTOCOL})')
     parser.add_argument('--socket', type=Path, required=True)
     parser.add_argument('launch_file', type=Path)
     parser.add_argument('arguments', nargs='*')

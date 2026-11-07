@@ -1,3 +1,8 @@
-"""Python-only devdash alternative. Core imports never require Qt."""
+"""Headless Core and optional Tkinter GUI share one installed distribution."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("devdash-python")
+except PackageNotFoundError:
+    __version__ = "0+uninstalled"

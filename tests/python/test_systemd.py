@@ -269,3 +269,146 @@ async def test_both_managers_readonly():
         assert backend.systemd.session("user").bus is not backend.systemd.session("system").bus
     finally:
         await backend.close()
+
+
+async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path):
+    """Run the supplied template under a unique name; never enable or set linger."""
+    import signal
+    import sys
+
+    import yaml
+
+    from devdash.installation import template
+    from devdash.ipc import request
+
+    prefix = "devdash-py-it-resident-" + uuid.uuid4().hex[:8]
+    core_name, worker_name = prefix + "-core.service", prefix + "-worker.service"
+    runtime_name = prefix + "-core"
+    runtime = Path(os.environ["XDG_RUNTIME_DIR"])
+    socket = runtime / runtime_name / "core.sock"
+    config_path, state_path = tmp_path / "config.yaml", tmp_path / "approvals.json"
+    config = Config(
+        {
+            "workloads": {"worker": {"backend": "systemd", "unit": worker_name}},
+            "groups": {"robot": {"steps": [{"workload": "worker"}, {"gate": "ready"}]}},
+            "gates": {"ready": {"type": "manual"}},
+        }
+    )
+    config_path.write_text(yaml.safe_dump(config.json()))
+    body = template("core")
+    lines = body.splitlines()
+    lines = [
+        f'ExecStart="{sys.executable}" -I -m devdash --socket "%t/{runtime_name}/core.sock" daemon --config "{config_path}" --state "{state_path}"'
+        if line.startswith("ExecStart=")
+        else f"RuntimeDirectory={runtime_name}"
+        if line.startswith("RuntimeDirectory=")
+        else line
+        for line in lines
+    ]
+    bodies = {
+        core_name: "\n".join(lines) + "\n",
+        worker_name: "[Unit]\nDescription=devdash isolated resident workload\n[Service]\nExecStart=/bin/sleep 3600\nKillMode=control-group\n",
+    }
+    directory = runtime / "systemd/user"
+    directory.mkdir(parents=True, exist_ok=True)
+    backend = Backends(config)
+    await backend.start()
+    manager = backend.systemd.session("user")
+    core_work = {"scope": "user", "unit": core_name}
+    worker = config.workloads["worker"]
+    files = []
+
+    async def core_when(predicate):
+        async def poll():
+            while True:
+                try:
+                    value = await request(socket, {"command": "snapshot"})
+                    if predicate(value):
+                        return value
+                except OSError:
+                    pass
+                await asyncio.sleep(0.02)
+
+        return await asyncio.wait_for(poll(), 15)
+
+    async def unchanged(original):
+        current = await backend.observe(worker)
+        assert current["state"] == "active"
+        assert (current["pid"], current["invocation_id"]) == (
+            original["pid"],
+            original["invocation_id"],
+        )
+
+    try:
+        for name, value in bodies.items():
+            path = directory / name
+            path.write_text(value)
+            files.append(path)
+        await manager.call("Reload")
+        await backend.operate(worker, "start")
+        original = await backend.observe(worker)
+        await backend.systemd.operate(core_work, "start")
+        initial = await core_when(
+            lambda value: value["observations"].get("worker", {}).get("state") == "active"
+        )
+        assert initial["run"]["status"] == "" and not initial["approved"]
+        assert socket.stat().st_mode & 0o777 == 0o600
+        await unchanged(original)
+        await request(socket, dict(command="operate", target="robot", group=True, action="start"))
+        await core_when(lambda value: value["run"]["waiting_gate"] == "ready")
+        await manager.call("KillUnit", "ssi", [core_name, "main", signal.SIGKILL])
+        # Restart=on-failure performs this restart, not devdash.
+        recovered = await core_when(
+            lambda value: (
+                value["core"]["instance"] != initial["core"]["instance"]
+                and value["observations"].get("worker", {}).get("state") == "active"
+            )
+        )
+        assert recovered["run"]["status"] == "" and not recovered["approved"]
+        await unchanged(original)
+        await backend.systemd.operate(core_work, "stop")
+        assert not socket.exists()
+        await unchanged(original)
+        await backend.systemd.operate(core_work, "start")
+        restarted = await core_when(
+            lambda value: value["observations"].get("worker", {}).get("state") == "active"
+        )
+        assert restarted["core"]["instance"] != recovered["core"]["instance"]
+        assert restarted["run"]["status"] == ""
+        await unchanged(original)
+        await request(socket, dict(command="operate", target="robot", group=True, action="start"))
+        await core_when(lambda value: value["run"]["waiting_gate"] == "ready")
+        await request(socket, {"command": "approve", "gate": "ready"})
+        await core_when(lambda value: value["run"]["status"] == "completed")
+        await backend.systemd.operate(core_work, "stop")
+        await backend.systemd.operate(core_work, "start")
+        restored = await core_when(
+            lambda value: value["observations"].get("worker", {}).get("state") == "active"
+        )
+        assert restored["approved"] == ["ready"] and restored["run"]["status"] == ""
+        await unchanged(original)
+        assert state_path.stat().st_mode & 0o777 == 0o600
+    finally:
+        errors = []
+        for name in (core_name, worker_name):
+            if any(path.name == name for path in files):
+                try:
+                    await asyncio.wait_for(
+                        backend.systemd.operate({"scope": "user", "unit": name}, "stop"), 10
+                    )
+                except Exception as error:
+                    errors.append(str(error))
+                try:
+                    await manager.call("ResetFailedUnit", "s", [name])
+                except Exception:
+                    pass
+        for path in files:
+            path.unlink(missing_ok=True)
+        await manager.call("Reload")
+        await backend.close()
+        assert not errors, errors
+        private_runtime = runtime / runtime_name
+        (private_runtime / "core.sock").unlink(missing_ok=True)
+        (private_runtime / "core.lock").unlink(missing_ok=True)
+        if private_runtime.exists():
+            private_runtime.rmdir()

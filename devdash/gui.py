@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
+import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
 from tkinter.scrolledtext import ScrolledText
 
 import ttkbootstrap as ttk
 
-from .ipc import default_socket, request
+from . import __version__
+from .ipc import OutcomeUnknown, default_socket, request
+from .protocol import MUTATIONS, CompatibilityError, check_core
 
 
 def set_text(widget, text):
@@ -35,6 +42,7 @@ class Window(ttk.Window):
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="devdash-ipc")
         self.pending = []
         self.snapshot = None
+        self.connected = False
         self.selection = None
         self.identities = {}
         self.polling = False
@@ -46,7 +54,7 @@ class Window(ttk.Window):
         outer.pack(fill="both", expand=True)
         bar = ttk.Frame(outer)
         bar.pack(fill="x", pady=(0, 10))
-        self.status = ttk.Label(bar, text="Connecting to Core…")
+        self.status = ttk.Label(bar, text="Connecting to Core…", wraplength=930)
         self.status.pack(side="left", fill="x", expand=True)
         self.scan_button = ttk.Button(bar, text="Scan / Import", command=self.scan_dialog)
         self.scan_button.pack(side="right")
@@ -125,30 +133,63 @@ class Window(ttk.Window):
     def send(self, command, callback=None):
         if self.closed:
             return
+        command = dict(command)
+        instance = self.snapshot["core"]["instance"] if self.snapshot else None
+        if command["command"] in MUTATIONS:
+            if not self.connected:
+                self.error.configure(text="Core is not connected; wait for fresh observations")
+                return
+            command["core_instance"] = instance
         if command["command"] != "snapshot":
             self.error.configure(text="")
         future = self.pool.submit(asyncio.run, request(self.socket, command))
-        self.pending.append((future, callback, command["command"] == "snapshot"))
+        self.pending.append((future, callback, command["command"], instance))
+
+    def disconnected(self, error):
+        self.connected = False
+        self.status.configure(
+            text=f"Core disconnected · showing last observations (stale) · retrying: {error}"
+        )
+        for iid in self.identities:
+            values = self.tree.item(iid, "values")
+            if values and values[0] and not values[0].endswith(" (stale)"):
+                self.tree.item(iid, values=(values[0] + " (stale)",))
+        self.selected()
 
     def tick(self):
         if self.closed:
             return
         pending, self.pending = self.pending, []
-        for future, callback, polling in pending:
+        for future, callback, command, instance in pending:
+            polling = command == "snapshot"
             if not future.done():
-                self.pending.append((future, callback, polling))
+                self.pending.append((future, callback, command, instance))
                 continue
             if polling:
                 self.polling = False
             try:
                 result = future.result()
+                if (
+                    not polling
+                    and instance
+                    and self.snapshot
+                    and instance != self.snapshot["core"]["instance"]
+                ):
+                    if command in MUTATIONS:
+                        self.error.configure(
+                            text="Core restarted; previous operation outcome unknown; old response discarded"
+                        )
+                    continue
                 if callback:
                     callback(result)
             except Exception as error:
                 if polling:
-                    self.status.configure(text=f"Core unavailable · retrying: {error}")
+                    self.disconnected(error)
                 else:
                     self.error.configure(text=str(error))
+                    if isinstance(error, (OutcomeUnknown, CompatibilityError)):
+                        self.disconnected(error)
+                        self.next_poll = 0
         self.next_poll -= 80
         if self.next_poll <= 0 and not self.polling:
             self.polling = True
@@ -157,9 +198,21 @@ class Window(ttk.Window):
         self.timer = self.after(80, self.tick)
 
     def render(self, value):
+        check_core(value.get("core"))
         first_render = self.snapshot is None
+        previous = self.snapshot
+        if previous and previous["core"]["instance"] != value["core"]["instance"]:
+            message = "New Core instance; observations reset; no sequence was resumed"
+            if previous["run"]["status"] in ("running", "cancelling"):
+                message += "; previous operation outcome unknown"
+            self.error.configure(text=message)
         self.snapshot = value
-        self.status.configure(text="Connected · systemd / Docker · Python Core")
+        self.connected = True
+        version = value["core"]["version"]
+        mismatch = " · version mismatch (IPC compatible)" if version != __version__ else ""
+        self.status.configure(
+            text=f"Connected · Core {version} · GUI {__version__} · IPC {value['core']['protocol']}{mismatch}"
+        )
         config = value["config"]
         identities = {}
         referenced = set()
@@ -287,7 +340,12 @@ class Window(ttk.Window):
         actions = []
         if value and kind in ("group", "workload"):
             details = value["config"]["groups" if kind == "group" else "workloads"][key]
-            details = dict(details, observation=value["observations"].get(key))
+            details = dict(
+                details,
+                observation=value["observations"].get(key),
+                observation_current=self.connected
+                and value["observations"].get(key, {}).get("state", "unknown") != "unknown",
+            )
             actions = ["start", "stop", "restart"] + (["reinitialize"] if kind == "group" else [])
         elif value and kind == "child":
             details = next(
@@ -303,16 +361,24 @@ class Window(ttk.Window):
             details = value["config"]["gates"][key]
         set_text(self.texts["Details"], json.dumps(details, indent=2, ensure_ascii=False))
         for action, button in self.buttons.items():
-            button.configure(state="normal" if not busy and action in actions else "disabled")
+            button.configure(
+                state="normal" if self.connected and not busy and action in actions else "disabled"
+            )
         gate = value["run"]["waiting_gate"] if value else None
         manual_wait = bool(gate and value["config"]["gates"][gate]["type"] == "manual")
         manual_selected = bool(
             value and kind == "gate" and value["config"]["gates"][key]["type"] == "manual"
         )
-        self.approve.configure(state="normal" if manual_wait or manual_selected else "disabled")
-        self.cancel.configure(
-            state="normal" if busy and value["run"]["status"] != "cancelling" else "disabled"
+        self.approve.configure(
+            state="normal" if self.connected and (manual_wait or manual_selected) else "disabled"
         )
+        self.cancel.configure(
+            state="normal"
+            if self.connected and busy and value["run"]["status"] != "cancelling"
+            else "disabled"
+        )
+
+        self.scan_button.configure(state="normal" if self.connected else "disabled")
 
     def operate(self, action):
         if not self.selection:
@@ -420,9 +486,41 @@ class ScanDialog(ttk.Toplevel):
         self.destroy()
 
 
+@contextmanager
+def gui_instance(socket, new_window=False):
+    """A per-socket Linux lock, separate from Core's RuntimeDirectory."""
+    if new_window:
+        yield True
+        return
+    directory = (
+        Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/devdash-{os.getuid()}")) / "devdash-gui"
+    )
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
+        raise ValueError("GUI lock directory must belong to the current user and have mode 0700")
+    name = hashlib.sha256(str(Path(socket).resolve()).encode()).hexdigest() + ".lock"
+    with (directory / name).open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="version", version=f"devdash-gui {__version__}")
     parser.add_argument("--socket", default=default_socket())
+    parser.add_argument("--new-window", action="store_true", help="Allow another GUI for this Core")
     args = parser.parse_args()
-    window = Window(args.socket)
-    window.mainloop()
+    with gui_instance(args.socket, args.new_window) as acquired:
+        if not acquired:
+            print("devdash GUI is already running for this Core")
+            return
+        window = Window(args.socket)
+        window.mainloop()
+
+
+if __name__ == "__main__":
+    main()

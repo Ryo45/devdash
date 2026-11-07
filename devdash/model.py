@@ -318,6 +318,7 @@ def observation(**values: Any) -> dict:
         health=None,
         children=[],
         children_error=None,
+        controller=None,
         error=None,
     )
     result.update(values)

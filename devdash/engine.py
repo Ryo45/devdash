@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import aiohttp
 
 from .inspection import Graph, inspect
 from .model import Config, Step, observation, step_workloads, systemd_key
+from .protocol import core_identity
 
 ACTIONS = {"start", "stop", "restart", "reinitialize"}
 
@@ -20,6 +22,7 @@ ACTIONS = {"start", "stop", "restart", "reinitialize"}
 class Engine:
     def __init__(self, config: Config, backend, state_file: Path | None = None, boot: str = "test"):
         self.config, self.backend = config, backend
+        self.core = core_identity(uuid.uuid4().hex)
         self.state_file, self.boot = state_file, boot
         self.approved: set[str] = set()
         if state_file and state_file.exists():
@@ -342,6 +345,7 @@ class Engine:
             reports[key] = report
         return copy.deepcopy(
             dict(
+                core=self.core,
                 config=self.config.json(),
                 run=self.run,
                 approved=sorted(self.approved),

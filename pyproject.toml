@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devdash-python"
-version = "0.1.0"
+version = "0.2.0"
 description = "Linux workload dashboard with a headless asyncio Core and Tkinter GUI"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
@@ -21,6 +21,9 @@ devdash-gui = "devdash.gui:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.14,<1"]
+
+[tool.setuptools.package-data]
+devdash = ["templates/*"]
 
 [tool.setuptools.packages.find]
 include = ["devdash*"]

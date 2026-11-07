@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=devdash
+Comment=Connect to devdash Core and manage workloads
+Exec=@EXEC@
+TryExec=@PYTHON@
+Terminal=false
+StartupNotify=false
+Categories=Development;

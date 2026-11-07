@@ -5,14 +5,19 @@ import asyncio
 import json
 from pathlib import Path
 
+from . import __version__
+from .installation import template
 from .ipc import default_socket, default_state, request, serve
 from .model import Config
 
 
 def parser():
     p = argparse.ArgumentParser(description="devdash — Linux workload dashboard")
+    p.add_argument("--version", action="version", version=f"devdash {__version__}")
     p.add_argument("--socket", type=Path, default=default_socket())
     commands = p.add_subparsers(dest="command", required=True)
+    integration = commands.add_parser("template")
+    integration.add_argument("kind", choices=("core", "autostart"))
     daemon = commands.add_parser("daemon")
     daemon.add_argument("--config", type=Path, required=True)
     daemon.add_argument("--state", type=Path, default=default_state())
@@ -52,6 +57,9 @@ def main():
     socket = args.pop("socket")
     command = args["command"]
     try:
+        if command == "template":
+            print(template(args["kind"]), end="")
+            return
         if command == "daemon":
             asyncio.run(serve(args["config"], socket, args["state"]))
             return

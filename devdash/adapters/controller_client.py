@@ -68,12 +68,33 @@ def main():
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(55)
             client.connect(path)
-            client.sendall(json.dumps(request).encode() + b"\n")
             with client.makefile("rb") as stream:
-                response = json.loads(stream.readline(2 * 1024 * 1024))
-        if not response.get("ok"):
-            raise ValueError(response.get("error", "bridge error"))
-        return response["data"]
+
+                def exchange(payload, compatible=False):
+                    client.sendall(json.dumps(dict(payload, protocol=1)).encode() + b"\n")
+                    response = json.loads(stream.readline(2 * 1024 * 1024))
+                    if not response.get("ok"):
+                        raise ValueError(response.get("error", "bridge error"))
+                    data = response["data"]
+                    info = data.get("bridge", {})
+                    if compatible and (
+                        type(info.get("protocol")) is not int or info["protocol"] != 1
+                    ):
+                        raise ValueError(
+                            f"Incompatible ROS Bridge IPC: expected 1, received {info.get('protocol', 'missing')}; operations disabled"
+                        )
+                    return data
+
+                if request["command"] == "operate":
+                    # Same connection for compatibility/epoch check and mutation.
+                    snapshot = exchange({"command": "snapshot"}, compatible=True)
+                    child = next(
+                        (child for child in snapshot["children"] if child["id"] == request["id"]),
+                        None,
+                    )
+                    if child is None or child["epoch"] != request.get("epoch"):
+                        raise ValueError("Bridge changed; refresh before operating")
+                return exchange(request, compatible=request["command"] == "operate")
     raise ValueError("unknown controller kind")
 
 

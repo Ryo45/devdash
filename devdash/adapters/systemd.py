@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections import deque
+from pathlib import Path
+from urllib.parse import quote
 
 from dbus_fast import BusType, Message, MessageFlag, MessageType, Variant
 from dbus_fast.aio import MessageBus
@@ -52,9 +55,11 @@ class Session:
         self.disconnect_task = None
 
     async def connect(self):
-        self.bus = await MessageBus(
-            bus_type=BusType.SESSION if self.scope == "user" else BusType.SYSTEM
-        ).connect()
+        options = {"bus_type": BusType.SESSION if self.scope == "user" else BusType.SYSTEM}
+        if self.scope == "user" and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+            options["bus_address"] = "unix:path=" + quote(str(runtime / "bus"), safe="/")
+        self.bus = await MessageBus(**options).connect()
         self.owner = (
             await self.call(
                 "GetNameOwner",

@@ -9,6 +9,7 @@ import time
 from .adapters.docker import DockerAPI, controller_children, epoch, host_rpc, ready
 from .adapters.systemd import Systemd
 from .model import observation
+from .protocol import bridge_info
 
 
 class Backends:
@@ -88,6 +89,8 @@ class Backends:
         if controller := work.get("controller"):
             try:
                 reply = await host_rpc(controller, {"command": "snapshot"})
+                if controller["kind"] == "roslaunch":
+                    result["controller"] = bridge_info(reply)
                 result["children"] = controller_children(
                     "host:" + work["scope"] + ":" + work["unit"],
                     controller,

@@ -16,7 +16,7 @@ def rpc(path, request):
     with socket.socket(socket.AF_UNIX) as client:
         client.settimeout(20)
         client.connect(str(path))
-        client.sendall(json.dumps(request).encode() + b'\n')
+        client.sendall(json.dumps(dict(request, protocol=1)).encode() + b'\n')
         with client.makefile('rb') as reader:
             return json.loads(reader.readline())
 

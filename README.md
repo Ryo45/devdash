@@ -36,6 +36,57 @@ python3 -m tkinter
 UbuntuのシステムPythonを明示するなら`uv sync --locked --extra gui --group dev --python /usr/bin/python3`を使います。
 ヘッドレスCoreにはTkinterもGUI用依存も不要です。
 
+## 常駐運用・自動起動・更新
+
+Core/GUIは`devdash-python 0.2.0`、ROS Bridgeは独立した`devdash-roslaunch 0.1.1`です。
+[常駐運用手順](docs/resident-operation.md)に、版固定インストール、配置、更新・ロールバック、互換性とトラブルシューティングをまとめています。
+
+本番用はレビュー済みの`v0.2.0`等へソースを固定し、wheelとハッシュ付き依存一覧から専用venvを作ります。
+
+```bash
+uv build --wheel
+uv export --locked --no-dev --extra gui --no-emit-project --output-file dist/devdash-0.2.0-requirements.txt
+DEVDASH_RELEASE="$HOME/.local/share/devdash/versions/0.2.0"
+uv venv --python /usr/bin/python3 "$DEVDASH_RELEASE"
+uv pip install --python "$DEVDASH_RELEASE/bin/python" --require-hashes -r dist/devdash-0.2.0-requirements.txt
+uv pip install --python "$DEVDASH_RELEASE/bin/python" --no-deps dist/devdash_python-0.2.0-py3-none-any.whl
+ln -sfn "$DEVDASH_RELEASE" "$HOME/.local/share/devdash/current"
+```
+
+`~/.config/devdash/config.yaml`を用意・validateした後、必要なものだけ明示的に有効化します。
+同じSocketを使う手動起動のCoreがあれば、そのCoreだけを先に終了してください。Workloadを停止する必要はありません。
+
+```bash
+mkdir -p "$HOME/.config/systemd/user" "$HOME/.config/autostart"
+"$HOME/.local/share/devdash/current/bin/devdash" template core > "$HOME/.config/systemd/user/devdash-core.service"
+systemctl --user daemon-reload
+systemctl --user enable --now devdash-core.service
+# ログイン前からCoreを起動する場合のみ。devdashは実行しません。
+loginctl enable-linger "$USER"
+# デスクトップログイン時にGUIを開く場合のみ。
+"$HOME/.local/share/devdash/current/bin/devdash" template autostart > "$HOME/.config/autostart/devdash.desktop"
+```
+
+Coreは観測だけで起動し、Robotを自動起動しません。GUIを閉じてもCoreとWorkloadは継続します。
+GUIは通信断中の表示をstaleとし、操作を無効化して復旧を待ちます。同じSocketのGUIは既定で一つ、`--new-window`で明示的に増やせます。
+版・接続状態はGUIに表示し、非互換IPCや古いCore/Bridge世代の操作を拒否します。中断したシーケンスは再開せず、応答を失った操作を自動再送しません。
+
+更新時は新しい版を別の`versions/<version>`へ導入・確認し、進行中操作が完了してからGUIを閉じ、次を行います。
+
+```bash
+systemctl --user stop devdash-core.service
+ln -sfn "$DEVDASH_RELEASE" "$HOME/.local/share/devdash/current"
+systemctl --user start devdash-core.service
+"$HOME/.local/share/devdash/current/bin/python" -I -m devdash.gui
+```
+
+ロールバックは、保管した互換性のある旧venvへ`DEVDASH_RELEASE`を設定し、版と設定を確認して同じ手順で戻します。
+Core停止・更新は管理対象のStop/Restartを発行しません。承認は同じboot IDなら保持し、シーケンス結果は復元しません。
+ROS BridgeはROS側へ別途インストールし、Core/GUIの更新に合わせて毎回更新する必要はありません。
+
+困った場合は`systemctl --user status devdash-core.service`、`journalctl --user -u devdash-core.service -b`、
+`devdash --version`、`devdash status`で実行パス・版・権限・接続を確認してください。PolkitやDocker socketの権限はCore実行ユーザーで評価されます。
+
 ## 起動
 
 既存サービスに合わせてサンプルYAMLのunit名を編集します。devdashはunitやコンテナを作成しません。
@@ -117,8 +168,9 @@ uv run ruff check devdash tests/python
 uv run ruff format --check devdash tests/python
 ```
 
-Rust版の65テストが保証していた振る舞いをPythonへ移植し、パラメーター化を含む118テストを検証しています。
+Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性の追加分も含め、パラメーター化した151テストを検証しています。
 専用D-Busの返信順序・切断・再接続、実user unit、専用Docker、Tkinter GUI、別CoreプロセスのIPCを含みます。
+常駐運用の追加テストにはCoreのSIGTERM/SIGKILL、GUIの通信断復旧、旧/非互換IPC、配布unitでの自動再起動とWorkloadのPID維持を含みます。
 対応表と移植中に見つかった不具合、テストの書きやすさの比較は[テスト復元記録](docs/test-restoration.md)を参照してください。
 ROS 2 Jazzyの任意テストと制約は[Bridge README](bridges/roslaunch/README.md)を参照してください。
 

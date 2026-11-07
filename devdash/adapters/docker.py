@@ -10,6 +10,7 @@ from urllib.parse import quote
 import aiohttp
 
 from ..model import observation
+from ..protocol import bridge_info, check_bridge
 
 CLIENT = Path(__file__).with_name("controller_client.py").read_text()
 LIMIT = 4 * 1024 * 1024
@@ -80,6 +81,7 @@ def supervisor_children(prefix, reply, namespace="container"):
 def controller_children(prefix, controller, reply, namespace="container"):
     if controller["kind"] == "supervisord":
         return supervisor_children(prefix, reply, namespace)
+    check_bridge(reply)
     result = reply["children"]
     for child in result:
         child["epoch"] = f"{prefix}/{child['epoch']}"
@@ -262,7 +264,11 @@ class DockerAPI:
             result["children_error"] = f"Process inspection: {error}"
         if work.get("controller"):
             try:
-                result["children"].extend(await self.children(info, work["controller"]))
+                controller = work["controller"]
+                reply = await self.rpc(info, controller, {"command": "snapshot"})
+                if controller["kind"] == "roslaunch":
+                    result["controller"] = bridge_info(reply)
+                result["children"].extend(controller_children(epoch(info), controller, reply))
             except Exception as error:
                 result["children_error"] = f"Controller unavailable; no repair attempted: {error}"
         result["children"].sort(key=lambda child: (child["kind"] == "process", child["name"]))

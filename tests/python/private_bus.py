@@ -210,7 +210,7 @@ class Harness:
             }
         )
 
-        def bus_factory(*, bus_type):
+        def bus_factory(*, bus_type, **options):
             scope = "user" if bus_type == BusType.SESSION else "system"
             return MessageBus(bus_address=self.buses[scope].address)
 

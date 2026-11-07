@@ -1,5 +1,7 @@
 # Rust版テストのPython移植と書きやすさ
 
+この文書はテスト復元時（118ケース）の記録です。その後、[常駐運用・互換性](resident-operation.md)のテストを追加し、現在は151ケースです。
+
 比較元はRust版 `35ecdea`（`archive/rust-gpui`）です。`tests/*.rs`と`src/docker.rs`・`src/systemd_events.rs`内のテスト、合計65本を照合しました。
 Pythonでは1本のRustテストを複数の独立テストやパラメーターに分けているため、本数の一致は目標にしていません。
 以下は、元の65本が検証していた振る舞いと現在のPythonテストの対応です。別に維持しているROS BridgeのJazzyテストとGUI操作テストは、この65本の集計には含めません。

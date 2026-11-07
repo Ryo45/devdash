@@ -74,7 +74,7 @@ managerのrespawn時も自動再ロードせず、接続世代を変えて新し
 
 - `{"command":"snapshot"}`: epoch、sequence、childrenを返す。
 - `{"command":"watch"}`: 初期Snapshotと変更時のSnapshotを継続通知する。
-- `{"command":"operate","id":"...","epoch":"...","action":"stop"}`: 能力を確認して操作する。
+- `{"command":"operate","protocol":1,"id":"...","epoch":"...","action":"stop"}`: 能力を確認して操作する。
 
 応答は`{"ok":true,"data":...,"error":null}`です。古いepochの操作は拒否します。
 プロセスのepochはBridge UUID、コンポーネントのepochはBridge UUID＋manager Actionの起動世代です。
@@ -88,3 +88,17 @@ ROSサービスにはmanager世代を条件にした原子的なUnloadがあり�
 
 `tools/ros_launch_probe.py`と`tests/roslaunch/test_bridge.py`を実ROS 2 Jazzy上で検証しています。
 再実行方法と検証結果は[設計・検証記録](../../docs/container-processes-and-roslaunch.md)を参照してください。
+
+## 独立した版とIPC互換性
+
+Bridgeは`devdash-roslaunch 0.1.1`としてCore/GUIとは別に配布します。
+`devdash-roslaunch --version`またはdistributionメタデータから版を確認できます。起動せずに確認でき、ROSノードは開始しません。
+Snapshotには`bridge: {version: ..., protocol: 1}`を含めます。パッケージ版が違ってもIPC世代が合えば利用できます。
+
+`operate`には`protocol: 1`が必要です。互換性確認のSnapshotと操作は同じ接続で送れます。
+既存のepoch検査も維持し、古いBridgeやComponentManager世代を操作しません。Snapshot/watchは互換性調査のため取得できます。
+Core 0.2.0は無世代の旧Bridgeへ子操作を送らず、版・非互換理由を表示します。0.1.0からは一度更新が必要です。
+以後、Core更新ごとにBridgeも更新する必要はありません。
+
+配置・手動更新・ロールバックは[常駐運用](../../docs/resident-operation.md)を参照してください。
+Core用venvにROSを導入せず、BridgeはROSのvenvまたはイメージ側に配置します。
