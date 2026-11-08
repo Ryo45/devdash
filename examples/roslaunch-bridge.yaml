@@ -1,5 +1,3 @@
-# The systemd unit remains the process definition of record. Its ExecStart runs
-# devdash-roslaunch; no launch commands/environment are duplicated here.
 workloads:
   robot:
     backend: systemd
@@ -7,8 +5,14 @@ workloads:
     unit: robot-launch.service
     controller:
       kind: roslaunch
-      socket: /run/user/1000/devdash/robot-launch.sock  # Edit for your UID.
+      socket: /run/user/1000/devdash/robot-launch.sock
       python: python3
-groups:
-  robot:
-    steps: [{workload: robot}]
+    name: ''
+stages:
+- id: stage-1
+  name: robot
+  description: Migrated robot, Step 1; review Stage boundary
+  checks: []
+  workloads:
+  - robot
+dependencies: {}

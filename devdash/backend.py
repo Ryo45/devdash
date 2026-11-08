@@ -6,7 +6,9 @@ import asyncio
 import json
 import time
 
-from .adapters.docker import DockerAPI, controller_children, epoch, host_rpc, ready
+import aiohttp
+
+from .adapters.docker import DockerAPI, controller_children, epoch, host_rpc
 from .adapters.systemd import Systemd
 from .model import docker_reference, observation
 from .protocol import bridge_info
@@ -86,11 +88,14 @@ class Backends:
             raise RuntimeError("Container not found; no container was created")
         return api, info
 
-    async def operate(self, work, action, lease=None):
+    async def operate(self, work, action, lease=None, cancel=None):
+        """False means Cancel prevented dispatch; issued requests are always drained."""
         self.requested(work)
         if work["backend"] == "systemd":
-            return await self.systemd.operate(work, action, lease)
+            return await self.systemd.operate(work, action, lease, cancel)
         api, info = await self.resolved(work)
+        if cancel is not None and cancel.is_set():
+            return False
         return await api.operate(info, action)
 
     async def observe_docker(self, work):
@@ -99,6 +104,30 @@ class Backends:
         return await api.observe(work, info) if info else observation(state="not_found")
 
     async def observe(self, work):
+        async def http_observation():
+            settings = work.get("observer", {}).get("http")
+            if not settings:
+                return None
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=settings["timeout_ms"] / 1000)
+                ) as session:
+                    async with session.get(settings["url"], allow_redirects=False) as response:
+                        return dict(
+                            state="ready"
+                            if response.status == settings["expected_status"]
+                            else "not_ready",
+                            status=response.status,
+                            error=None,
+                        )
+            except Exception as error:
+                return dict(state="unknown", status=None, error=str(error) or type(error).__name__)
+
+        result, http = await asyncio.gather(self.observe_primary(work), http_observation())
+        result["http"] = http
+        return result
+
+    async def observe_primary(self, work):
         if work["backend"] == "docker":
             return await self.observe_docker(work)
 
@@ -148,15 +177,7 @@ class Backends:
             result["children_error"] = result["observer_error"] = str(error)
         return result
 
-    async def readiness(self, work):
-        # Compatibility container_ready Gate always re-resolves the observer.
-        if docker_reference(work):
-            api = await self.api(work)
-            info = await api.resolve(docker_reference(work))
-            return info is not None and ready(info)
-        return False
-
-    async def operate_child(self, work, child_id, expected_epoch, action):
+    async def operate_child(self, work, child_id, expected_epoch, action, cancel=None):
         controller = work.get("controller")
         if not controller:
             raise ValueError("No controller configured; OS processes are observation-only")
@@ -180,6 +201,8 @@ class Backends:
             raise ValueError("Container/controller changed; refresh before operating")
         if action not in child["actions"]:
             raise ValueError("Operation unsupported: " + child.get("reason", "controller state"))
+        if cancel is not None and cancel.is_set():
+            return False
         self.requested(work)
         await rpc(
             {

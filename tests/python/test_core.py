@@ -1,183 +1,101 @@
+"""Stage replacement for old coordinator contracts: explicit requests, no durable progress."""
+
 import asyncio
-import copy
 
 import pytest
-from aiohttp import web
 from conftest import until
 
 from devdash.engine import Engine
-from devdash.model import Config, ConfigError, UnitKey, observation
+from devdash.model import Config, ConfigError
 
 
-async def test_forward_reverse_and_partial_restart(engine, backend):
-    engine.approve("ready")
-    engine.launch("robot", True, "start")
+async def test_stage_start_waits_for_both_parallel_results_and_next_is_explicit(engine, backend):
+    release = backend.block["camera"] = asyncio.Event()
+    engine.launch("sensors", True, "start")
+    await until(lambda: len(backend.calls) == 2)
+    assert engine.busy
+    assert set(backend.calls) == {("camera", "start"), ("imu", "start")}
+    release.set()
     assert (await engine.wait())["status"] == "completed"
-    assert set(backend.calls[:2]) == {("camera", "start"), ("imu", "start")}
-    assert backend.calls[2:] == [("detector", "start"), ("planner", "start")]
-    backend.calls.clear()
-    engine.launch("perception", True, "restart")
-    await engine.wait()
-    assert backend.calls == [("detector", "stop"), ("detector", "start")]
-    backend.calls.clear()
-    engine.launch("robot", True, "restart")
-    assert (await engine.wait())["status"] == "completed"
-    assert backend.calls[:2] == [("planner", "stop"), ("detector", "stop")]
-    assert set(backend.calls[2:4]) == {("camera", "stop"), ("imu", "stop")}
-    assert backend.calls[-2:] == [("detector", "start"), ("planner", "start")]
-
-
-async def test_manual_gate_individual_bypass_and_reinitialize(engine, backend):
-    engine.launch("detector", False, "start")
-    await engine.wait()
-    assert backend.calls == [("detector", "start")]
-    backend.calls.clear()
-    engine.launch("robot", True, "start")
-    await until(lambda: engine.run["waiting_gate"] == "ready")
     assert len(backend.calls) == 2
-    engine.approve("ready")
+    engine.launch_next("sensors")
     assert (await engine.wait())["status"] == "completed"
-    engine.launch("robot", True, "reinitialize")
-    await until(lambda: engine.run["waiting_gate"] == "ready")
-    assert "ready" not in engine.approved
-    engine.request_cancel()
-    assert (await engine.wait())["status"] == "cancelled"
-    assert engine.run["progress"][-1]["status"] == "skipped"
+    assert backend.calls[-1] == ("detector", "start")
+    assert ("planner", "start") not in backend.calls
 
 
-async def test_cancel_drains_parallel_and_rejects_conflict(engine, backend):
-    backend.block = {key: asyncio.Event() for key in ("camera", "imu")}
-    engine.launch("robot", True, "restart")
-    await until(lambda: len(backend.calls) == 4)
-    with pytest.raises(ValueError, match="Another"):
-        engine.launch("planner", False, "restart")
-    engine.request_cancel()
-    assert engine.run["status"] == "cancelling"
-    assert not engine.task.done()
-    for event in backend.block.values():
-        event.set()
-    result = await engine.wait()
-    assert result["status"] == "cancelled"
-    assert all(action == "stop" for _, action in backend.calls)
-    assert all(
-        step["status"] == "skipped" for step in result["progress"] if step["action"] == "start"
-    )
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+async def test_only_selected_stage_is_operated(engine, backend, action):
+    engine.launch("perception", True, action)
+    assert (await engine.wait())["status"] == "completed"
+    assert backend.calls == [("detector", action)]
 
 
-async def test_parallel_failure_drains_and_no_rollback(engine, backend):
+async def test_partial_failure_drains_every_result_without_rollback(engine, backend):
     backend.fail.add("camera")
     backend.block["imu"] = asyncio.Event()
-    engine.launch("robot", True, "start")
+    engine.launch("sensors", True, "start")
     await until(lambda: len(backend.calls) == 2)
-    assert not engine.task.done()
+    assert engine.busy
     backend.block["imu"].set()
-    result = await engine.wait()
-    assert result["status"] == "failed"
-    assert len(backend.calls) == 2
-    assert all(action == "start" for _, action in backend.calls)
-    assert result["progress"][-1]["status"] == "skipped"
-
-
-async def test_lost_manager_during_gate_never_resumes(engine, backend):
-    engine.launch("robot", True, "start")
-    await until(lambda: engine.run["waiting_gate"] == "ready")
-    backend.lost.set()
-    assert (await engine.wait())["status"] == "failed"
-    engine.approve("ready")
-    await asyncio.sleep(0.02)
+    run = await engine.wait()
+    assert run["status"] == "failed"
+    assert {p["workload"]: p["status"] for p in run["progress"]} == {
+        "camera": "failed",
+        "imu": "completed",
+    }
     assert len(backend.calls) == 2
 
 
-def test_boot_persistence(config, backend, tmp_path):
-    path = tmp_path / "approvals.json"
-    first = Engine(config, backend, path, "boot-a")
-    first.approve("ready")
-    assert Engine(config, backend, path, "boot-a").approved == {"ready"}
-    assert Engine(config, backend, path, "boot-b").approved == set()
+async def test_cancel_drains_dispatched_requests_and_does_not_start_another_stage(engine, backend):
+    backend.block["camera"] = asyncio.Event()
+    engine.launch("sensors", True, "start")
+    await until(lambda: len(backend.calls) == 2)
+    engine.request_cancel()
+    assert engine.run["status"] == "cancelling" and engine.busy
+    with pytest.raises(ValueError, match="Another"):
+        engine.launch_next("sensors")
+    backend.block["camera"].set()
+    assert (await engine.wait())["status"] == "cancelled"
+    assert all(p["status"] == "completed" for p in engine.run["progress"])
+    assert len(backend.calls) == 2
+
+
+async def test_direct_restart_is_backend_restart_and_new_core_has_no_history(config, backend):
+    engine = Engine(config, backend)
+    engine.launch("camera", False, "restart")
+    assert (await engine.wait())["status"] == "completed"
+    assert backend.calls == [("camera", "restart")]
+    recovered = Engine(config, backend)
+    assert recovered.run["status"] == "" and not recovered.observations
+    assert not hasattr(recovered, "approved") and not hasattr(recovered, "gate")
+    await recovered.poll()
+    assert recovered.observations["camera"]["state"] == "active"
+    assert len(backend.calls) == 1
 
 
 @pytest.mark.parametrize(
-    "mutation",
-    ["cycle", "duplicate_workload", "duplicate_group", "unknown", "badstep", "badbackend"],
+    "change", ["duplicate", "unknown", "same", "reverse", "cycle", "cross", "docker", "old"]
 )
-def test_validation(config, mutation):
+def test_stage_and_dependency_validation(config, change):
     raw = config.json()
-    if mutation == "cycle":
-        raw["groups"]["sensors"]["steps"].append({"group": "robot"})
-    elif mutation == "duplicate_workload":
-        raw["groups"]["robot"]["steps"].append({"workload": "camera"})
-    elif mutation == "duplicate_group":
-        raw["groups"]["robot"]["steps"].append({"group": "sensors"})
-    elif mutation == "unknown":
-        raw["groups"]["robot"]["steps"].append({"gate": "absent"})
-    elif mutation == "badstep":
-        raw["groups"]["robot"]["steps"].append({"parallel": []})
+    if change == "duplicate":
+        raw["stages"][1]["workloads"].append("camera")
+    elif change == "unknown":
+        raw["stages"][0]["workloads"].append("missing")
+    elif change == "same":
+        raw["dependencies"] = {"camera": ["imu"]}
+    elif change == "reverse":
+        raw["dependencies"] = {"camera": ["detector"]}
+    elif change == "cycle":
+        raw["dependencies"] = {"camera": ["detector"], "detector": ["camera"]}
+    elif change == "cross":
+        raw["workloads"]["camera"]["scope"] = "system"
+        raw["dependencies"] = {"detector": ["camera"]}
+    elif change == "docker":
+        raw["workloads"]["camera"] = {"backend": "docker", "docker": {"container": "camera"}}
+        raw["dependencies"] = {"detector": ["camera"]}
     else:
-        del raw["workloads"]["camera"]["backend"]
+        raw["groups"] = {}
     with pytest.raises(ConfigError):
         Config(raw)
-
-
-def test_duplicate_yaml_and_scope_identity(config):
-    with pytest.raises(ConfigError, match="Duplicate"):
-        Config.parse("workloads: {}\nworkloads: {}")
-    raw = config.json()
-    raw["workloads"]["system_camera"] = dict(
-        backend="systemd", scope="system", unit="camera.service"
-    )
-    Config(raw)
-    raw["workloads"]["system_camera"]["scope"] = "user"
-    with pytest.raises(ConfigError, match="Duplicate backend"):
-        Config(raw)
-    assert UnitKey("user", "camera.service") != UnitKey("system", "camera.service")
-
-
-@pytest.mark.parametrize("success", [True, False])
-async def test_http_gate(config, backend, success):
-    app = web.Application()
-
-    async def handle(request):
-        return web.Response(status=204 if success else 503)
-
-    app.router.add_get("/ready", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]
-    try:
-        raw = config.json()
-        raw["gates"]["ready"] = dict(
-            type="http",
-            url=f"http://127.0.0.1:{port}/ready",
-            expected_status=204,
-            timeout_ms=100,
-            interval_ms=10,
-        )
-        engine = Engine(Config(raw), backend)
-        engine.launch("robot", True, "start")
-        assert (await engine.wait())["status"] == ("completed" if success else "failed")
-        assert len(backend.calls) == (4 if success else 2)
-    finally:
-        await runner.cleanup()
-
-
-async def test_monitor_baseline_outage_dedup_and_no_repair(engine, backend):
-    baseline = {
-        key: observation(state="inactive", manager_generation=1) for key in engine.config.workloads
-    }
-    engine.update(copy.deepcopy(baseline))
-    assert not engine.events
-    baseline["detector"] = observation(state="active", invocation_id="one", manager_generation=1)
-    engine.update(copy.deepcopy(baseline))
-    assert any(event["kind"] == "gate_mismatch" for event in engine.events)
-    count = len(engine.events)
-    engine.update(copy.deepcopy(baseline))
-    assert len(engine.events) == count
-    baseline["detector"] = observation(error="unavailable")
-    engine.update(copy.deepcopy(baseline))
-    baseline["detector"] = observation(state="active", invocation_id="two", manager_generation=2)
-    engine.update(baseline)
-    assert len([e for e in engine.events if e["kind"] == "gate_mismatch"]) == 1
-    assert any(e["kind"] == "observation_restored" for e in engine.events)
-    assert backend.calls == []

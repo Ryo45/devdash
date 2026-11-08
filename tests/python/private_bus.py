@@ -247,12 +247,10 @@ class Harness:
                     },
                     "after": {"backend": "systemd", "unit": "after.service"},
                 },
-                "groups": {
-                    "robot": {
-                        "steps": [{"workload": "probe"}, {"gate": "ready"}, {"workload": "after"}]
-                    }
-                },
-                "gates": {"ready": {"type": "manual"}},
+                "stages": [
+                    {"id": "robot", "workloads": ["probe"]},
+                    {"id": "next", "workloads": ["after"]},
+                ],
             }
         )
 

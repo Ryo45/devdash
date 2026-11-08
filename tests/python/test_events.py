@@ -186,18 +186,18 @@ async def test_managers_absent_at_startup_recover_without_restarting_core(bus_fi
     assert not h.managers["user"].calls
 
 
-async def test_group_waiting_at_gate_is_not_resumed_after_manager_replacement(bus_fixture):
+async def test_pending_stage_is_not_replayed_after_manager_replacement(bus_fixture):
     h = await bus_fixture.start()
+    manager = h.managers["user"]
+    manager.hold_job = True
     h.engine.launch("robot", True, "start")
-    await until(lambda: h.engine.run["waiting_gate"] == "ready")
-    await h.managers["user"].bus.release_name(SERVICE)
-    assert (await asyncio.wait_for(h.engine.wait(), 2))["status"] == "failed"
+    await until(lambda: bool(manager.calls))
+    await manager.bus.release_name(SERVICE)
+    assert (await h.engine.wait())["status"] == "failed"
     replacement = await h.peer("user")
-    await until(lambda: h.backend.health()["user"]["available"], timeout=8)
-    h.engine.approve("ready")
-    await h.engine.poll()
-    assert h.engine.run["status"] == "failed" and not replacement.calls
-    assert all(call[1] != "after.service" for peer in h.peers for call in peer.calls)
+    await until(lambda: h.backend.health()["user"]["available"])
+    assert replacement.calls == []
+    assert not h.engine.busy
 
 
 async def test_repeated_registered_unit_metadata_signals_do_not_displace_jobs(bus_fixture):
@@ -223,3 +223,16 @@ async def test_manager_loss_during_operation_preparation_does_not_start(bus_fixt
         assert "outcome unknown" in run["error"] and not manager.calls
     finally:
         release.set()
+
+
+async def test_cancel_during_unit_resolution_does_not_issue_a_systemd_job(bus_fixture):
+    h = await bus_fixture.start()
+    manager = h.managers["user"]
+    release = manager.pause("read")
+    h.engine.launch("probe", False, "start")
+    await manager.entered["read"].wait()
+    h.engine.request_cancel()
+    release.set()
+    run = await asyncio.wait_for(h.engine.wait(), 3)
+    assert run["status"] == "cancelled" and run["progress"][0]["status"] == "skipped"
+    assert manager.calls == []

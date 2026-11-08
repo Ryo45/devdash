@@ -1,0 +1,9 @@
+# Evaluation dummy only: this does not start a real detector.
+[Unit]
+Description=devdash Stage evaluation dummy detector
+
+[Service]
+Type=exec
+ExecStart=/bin/sleep infinity
+Restart=no
+TimeoutStopSec=3

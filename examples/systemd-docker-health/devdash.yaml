@@ -1,25 +1,36 @@
-# The existing unit owns mandatory readiness; devdash only waits for its job result.
 workloads:
   container:
     backend: systemd
-    scope: user # Use system if installing the unit in the system manager.
+    scope: user
     unit: robot-container.service
     observer:
-      docker: {container: robot-dev}
+      docker:
+        container: robot-dev
+        socket: /var/run/docker.sock
     controller:
       kind: supervisord
       socket: /tmp/devdash-supervisor.sock
+      python: python3
+    name: ''
   next:
     backend: systemd
     scope: user
     unit: robot-next.service
-
-groups:
-  robot:
-    steps:
-      - workload: container
-      - gate: operator
-      - workload: next
-
-gates:
-  operator: {type: manual}
+    name: ''
+stages:
+- id: container
+  workloads:
+  - container
+  checks:
+  - Inspect process/health before explicitly starting next
+  name: container
+  description: ''
+- id: next
+  workloads:
+  - next
+  name: next
+  description: ''
+  checks: []
+dependencies:
+  next:
+  - container

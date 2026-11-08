@@ -1,5 +1,7 @@
 # Python版の実験・検証記録
 
+> 比較元Coordinator方式（main `d143e97`）の記録です。このStageブランチの現行仕様・検証は[比較レポート](stage-comparison.md)と[設定手順](stage-configuration.md)を参照してください。旧操作の説明をStage版へ適用しないでください。
+
 現在のGUIはライセンス構成を変更するため、Qtからttkbootstrap + Tkinterへ移行しています。詳細は[GUI移行記録](gui-toolkit.md)を参照してください。
 
 ## 分離方法

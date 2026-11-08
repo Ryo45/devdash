@@ -17,7 +17,7 @@ import ttkbootstrap as ttk
 
 from . import __version__
 from .ipc import OutcomeUnknown, default_socket, request
-from .presentation import group_progress, workload_summary
+from .presentation import stage_progress, workload_summary
 from .protocol import MUTATIONS, CompatibilityError, check_core
 
 
@@ -68,7 +68,7 @@ class Window(ttk.Window):
         self.tree = ttk.Treeview(
             left, columns=("state", "readiness"), selectmode="browse", show="tree headings"
         )
-        self.tree.heading("#0", text="Group / Workload")
+        self.tree.heading("#0", text="Stage / Workload")
         self.tree.heading("state", text="Execution")
         self.tree.heading("readiness", text="Readiness")
         self.tree.column("readiness", width=95, minwidth=75, stretch=False)
@@ -82,22 +82,20 @@ class Window(ttk.Window):
         right = ttk.Frame(split, padding=(12, 0, 0, 0))
         split.add(right, weight=3)
         self.title_label = ttk.Label(
-            right, text="Select a Group or Workload", font=("", 12, "bold")
+            right, text="Select a Stage or Workload", font=("", 12, "bold")
         )
         self.title_label.pack(fill="x", pady=(0, 10))
         operations = ttk.Frame(right)
         operations.pack(fill="x")
         self.buttons = {}
-        for action in ("start", "stop", "restart", "reinitialize"):
+        for action in ("start", "stop", "restart"):
             button = ttk.Button(
                 operations, text=action.capitalize(), command=lambda a=action: self.operate(a)
             )
             button.pack(side="left", padx=(0, 5))
             self.buttons[action] = button
-        self.approve = ttk.Button(
-            operations, text="Continue · approval", bootstyle="success", command=self.approve_gate
-        )
-        self.approve.pack(side="left", padx=(0, 5))
+        self.next_button = ttk.Button(operations, text="Next Stage", command=self.next_stage)
+        self.next_button.pack(side="left", padx=(0, 5))
         self.cancel = ttk.Button(
             operations,
             text="Cancel",
@@ -105,6 +103,16 @@ class Window(ttk.Window):
             command=lambda: self.send({"command": "cancel"}, self.render),
         )
         self.cancel.pack(side="left")
+        settings = ttk.Frame(right)
+        settings.pack(fill="x", pady=(6, 0))
+        ttk.Button(settings, text="Configuration Editor", command=self.open_editor).pack(
+            side="left"
+        )
+        ttk.Button(
+            settings,
+            text="Reload Core config (no lifecycle)",
+            command=lambda: self.send({"command": "reload"}, self.render),
+        ).pack(side="left", padx=5)
         self.summary = ttk.Label(right, text="", wraplength=730, justify="left")
         self.summary.pack(fill="x", pady=(10, 0))
         self.run = ttk.Label(right, text="", wraplength=730)
@@ -145,6 +153,7 @@ class Window(ttk.Window):
                 self.error.configure(text="Core is not connected; wait for fresh observations")
                 return
             command["core_instance"] = instance
+            command["config_revision"] = self.snapshot["config_revision"]
         if command["command"] != "snapshot":
             self.error.configure(text="")
         future = self.pool.submit(asyncio.run, request(self.socket, command))
@@ -185,6 +194,14 @@ class Window(ttk.Window):
                             text="Core restarted; previous operation outcome unknown; old response discarded"
                         )
                     continue
+                if (
+                    isinstance(result, dict)
+                    and "config_revision" in result
+                    and self.snapshot
+                    and result.get("core", {}).get("instance") == self.snapshot["core"]["instance"]
+                    and result["config_revision"] < self.snapshot["config_revision"]
+                ):
+                    continue  # A delayed acknowledgement must not restore an old configuration.
                 if callback:
                     callback(result)
             except Exception as error:
@@ -207,7 +224,7 @@ class Window(ttk.Window):
         first_render = self.snapshot is None
         previous = self.snapshot
         if previous and previous["core"]["instance"] != value["core"]["instance"]:
-            message = "New Core instance; observations reset; no sequence was resumed"
+            message = "New Core instance; observations reset; no operation was replayed"
             if previous["run"]["status"] in ("running", "cancelling"):
                 message += "; previous operation outcome unknown"
             self.error.configure(text=message)
@@ -265,42 +282,10 @@ class Window(ttk.Window):
                 ):
                     self.tree.move(child_items[child["id"]], child_items[parent_id], "end")
 
-        def group(parent, key):
-            item = node(parent, config["groups"][key].get("name") or key, ["group", key])
-            for step in config["groups"][key]["steps"]:
-                kind, ref = next(iter(step.items()))
-                if kind == "group":
-                    group(item, ref)
-                elif kind == "workload":
-                    workload(item, ref)
-                elif kind == "parallel":
-                    for work in ref:
-                        workload(item, work)
-                else:
-                    gate = config["gates"][ref]
-                    state = (
-                        "approved"
-                        if ref in value["approved"]
-                        else "unapproved"
-                        if gate["type"] == "manual"
-                        else "check on start"
-                    )
-                    node(
-                        item,
-                        f"{'Approval' if gate['type'] == 'manual' else 'Readiness check'}: {ref}",
-                        ["gate", ref],
-                        state,
-                    )
-
-        children = {
-            step["group"]
-            for g in config["groups"].values()
-            for step in g["steps"]
-            if "group" in step
-        }
-        for key in config["groups"]:
-            if key not in children:
-                group("", key)
+        for stage in config["stages"]:
+            item = node("", stage["name"] or stage["id"], ["stage", stage["id"]])
+            for key in stage["workloads"]:
+                workload(item, key)
         for key in config["workloads"]:
             if key not in referenced:
                 workload("", key)
@@ -316,24 +301,11 @@ class Window(ttk.Window):
                 self.tree.selection_remove(*self.tree.selection())
                 self.selection = None  # Never fall back to parent after an epoch change.
         run = value["run"]
-        gate = run["waiting_gate"]
-        waiting = ""
-        if gate:
-            waiting = (
-                (
-                    "Developer Continue"
-                    if config["gates"][gate]["type"] == "manual"
-                    else "Readiness check"
-                )
-                + ": "
-                + gate
-            )
         self.run.configure(
-            text=f"Operation: {run['target']} {run['status']} · {waiting}\n{run.get('error') or ''}"
+            text=f"{run['kind']} {run['target']} {run['action']} · {run['status']}\n{run.get('error') or ''}"
             if run["status"]
-            else "No operation has run in this Core instance"
+            else "No operation history in this Core instance; select a Stage explicitly"
         )
-
         set_text(
             self.texts["Events"],
             "\n".join(
@@ -362,19 +334,22 @@ class Window(ttk.Window):
         busy = bool(value and value["run"]["status"] in ("running", "cancelling"))
         kind, key, *extra = self.selection or ["", ""]
         self.title_label.configure(
-            text=" / ".join((self.selection or ["Select a Group or Workload"])[:3])
+            text=" / ".join((self.selection or ["Select a Stage or Workload"])[:3])
         )
         details = {}
         actions = []
-        if value and kind in ("group", "workload"):
-            details = value["config"]["groups" if kind == "group" else "workloads"][key]
+        if value and kind in ("stage", "workload"):
+            details = (
+                next(stage for stage in value["config"]["stages"] if stage["id"] == key)
+                if kind == "stage"
+                else value["config"]["workloads"][key]
+            )
             details = dict(
                 details,
                 observation=value["observations"].get(key),
-                observation_current=self.connected
-                and value["observations"].get(key, {}).get("state", "unknown") != "unknown",
+                observation_current=self.connected,
             )
-            actions = ["start", "stop", "restart"] + (["reinitialize"] if kind == "group" else [])
+            actions = ["start", "stop", "restart"]
         elif value and kind == "child":
             details = next(
                 (
@@ -385,38 +360,25 @@ class Window(ttk.Window):
                 {},
             )
             actions = details.get("actions", [])
-        elif value and kind == "gate":
-            details = value["config"]["gates"][key]
         summary = ""
-        progress = "Select a Group to see sequence order and progress."
+        progress = "Select a Stage to see requested operations and the explicit Next target."
         if value and kind == "workload":
             summary = workload_summary(
                 value["config"]["workloads"][key],
                 value["observations"].get(key, {}),
                 self.connected,
             )
-        elif value and kind == "group":
-            summary = "Group sequence: Start forwards · Stop backwards · Restart stops then starts.\nManual Gate Continue permits sequence progress; it is not service readiness."
-            progress = group_progress(value, key)
+        elif value and kind == "stage":
+            summary = "Stage members start independently. No later Stage starts automatically.\nCancel skips undispatched requests; it does not cancel jobs or stop Workloads."
+            progress = stage_progress(value, key)
             if not self.connected:
-                progress = "STALE: Core disconnected; sequence outcome may be unknown\n" + progress
-        elif value and kind == "gate":
-            manual = details["type"] == "manual"
-            summary = (
-                (
-                    "Developer approval: "
-                    + ("approved" if key in value["approved"] else "not approved")
-                    + "; Continue permits Group progress. It does not start a service or certify readiness."
-                )
-                if manual
-                else "Readiness check: evaluated during Group Start; no developer approval."
-            )
+                progress = "STALE: Core disconnected; operation outcome may be unknown\n" + progress
         elif value and kind == "child":
             summary = "Internal child: operations go to its Child Controller. Parent Lifecycle is separate."
         self.summary.configure(text=summary)
         set_text(self.texts["Progress"], progress)
         set_text(self.texts["Details"], json.dumps(details, indent=2, ensure_ascii=False))
-        destination = {"group": "Group", "child": "child"}.get(kind, "Lifecycle")
+        destination = {"stage": "Stage", "child": "child"}.get(kind, "Lifecycle")
         if value and kind == "workload":
             destination = value["config"]["workloads"][key]["backend"]
         for action, button in self.buttons.items():
@@ -424,14 +386,17 @@ class Window(ttk.Window):
                 text=f"{action.capitalize()} ({destination})",
                 state="normal" if self.connected and not busy and action in actions else "disabled",
             )
-        gate = value["run"]["waiting_gate"] if value else None
-        manual_wait = bool(gate and value["config"]["gates"][gate]["type"] == "manual")
-        manual_selected = bool(
-            value and kind == "gate" and value["config"]["gates"][key]["type"] == "manual"
-        )
-        self.approve.configure(
-            text=f"Continue · {gate if manual_wait else key if manual_selected else 'approval'}",
-            state="normal" if self.connected and (manual_wait or manual_selected) else "disabled",
+        following = None
+        if value and kind == "stage":
+            ids = [stage["id"] for stage in value["config"]["stages"]]
+            index = ids.index(key) + 1
+            if index < len(ids):
+                following = value["config"]["stages"][index]
+        self.next_button.configure(
+            text=f"Next: {following['name']} ({', '.join(following['workloads'])})"
+            if following
+            else "No Next Stage",
+            state="normal" if self.connected and not busy and following else "disabled",
         )
         self.cancel.configure(
             state="normal"
@@ -445,21 +410,35 @@ class Window(ttk.Window):
         if not self.selection:
             return
         kind, key, *extra = self.selection
-        command = dict(command="operate", target=key, group=kind == "group", action=action)
+        command = dict(command="operate", target=key, kind=kind, action=action)
         if kind == "child":
             command = dict(
                 command="child", parent=key, child=extra[0], epoch=extra[1], action=action
             )
         self.send(command, self.render)
 
-    def approve_gate(self):
-        gate = self.snapshot["run"]["waiting_gate"]
-        if gate and self.snapshot["config"]["gates"][gate]["type"] != "manual":
-            gate = None
-        if not gate and self.selection and self.selection[0] == "gate":
-            gate = self.selection[1]
-        if gate:
-            self.send({"command": "approve", "gate": gate}, self.render)
+    def next_stage(self):
+        if self.selection and self.selection[0] == "stage":
+            after = self.selection[1]
+            stages = self.snapshot["config"]["stages"]
+            index = next(i for i, stage in enumerate(stages) if stage["id"] == after) + 1
+            if index >= len(stages):
+                return
+            target = stages[index]["id"]
+
+            def accepted(value):
+                self.render(value)
+                iid = json.dumps(["stage", target], ensure_ascii=False)
+                if self.tree.exists(iid):
+                    self.tree.selection_set(iid)
+                    self.selected()
+
+            self.send(dict(command="next", after=after), accepted)
+
+    def open_editor(self):
+        from .editor import Editor
+
+        return Editor(self)
 
     def logs(self):
         if self.selection and self.selection[0] in ("workload", "child"):
@@ -469,7 +448,9 @@ class Window(ttk.Window):
             )
 
     def scan_dialog(self):
-        return ScanDialog(self)
+        editor = self.open_editor()
+        editor.scan()
+        return editor
 
     def close(self):
         if self.closed:
@@ -478,72 +459,6 @@ class Window(ttk.Window):
         if self.timer:
             self.after_cancel(self.timer)
         self.pool.shutdown(wait=False, cancel_futures=True)
-        self.destroy()
-
-
-class ScanDialog(ttk.Toplevel):
-    """Non-modal scan. Selection always belongs to the displayed manager."""
-
-    def __init__(self, owner):
-        super().__init__(
-            title="Scan / Import existing systemd services", size=(650, 500), transient=owner
-        )
-        self.owner = owner
-        self.closed = False
-        self.generation = 0
-        self.protocol("WM_DELETE_WINDOW", self.close)
-        frame = ttk.Frame(self, padding=12)
-        frame.pack(fill="both", expand=True)
-        self.scope = ttk.Combobox(frame, values=("user", "system"), state="readonly")
-        self.scope.set("user")
-        self.scope.pack(fill="x")
-        self.scope.bind("<<ComboboxSelected>>", self.reset)
-        self.units = ttk.Treeview(frame, columns=("unit",), show="headings", selectmode="extended")
-        self.units.heading(
-            "unit", text="Existing services — select to import (Ctrl/Shift for multiple)"
-        )
-        self.units.column("unit", width=570)
-        self.units.pack(fill="both", expand=True, pady=10)
-        self.message = ttk.Label(
-            frame, text="Scan is on demand. Import adds references only.", wraplength=610
-        )
-        self.message.pack(fill="x")
-        self.scan_button = ttk.Button(frame, text="Scan", command=self.scan)
-        self.scan_button.pack(fill="x", pady=5)
-        self.import_button = ttk.Button(
-            frame, text="Import selected services", command=self.do_import
-        )
-        self.import_button.pack(fill="x")
-
-    def reset(self, event=None):
-        self.generation += 1
-        self.units.delete(*self.units.get_children())
-
-    def scan(self):
-        self.reset()
-        generation, scope = self.generation, self.scope.get()
-
-        def received(result):
-            if not self.closed and self.generation == generation and self.scope.get() == scope:
-                for unit in result:
-                    self.units.insert("", "end", iid=unit, values=(unit,))
-
-        self.owner.send({"command": "scan", "scope": scope}, received)
-
-    def do_import(self):
-        units = list(self.units.selection())
-        if units:
-
-            def imported(result):
-                if not self.closed:
-                    self.message.configure(text="Imported: " + ", ".join(result))
-
-            self.owner.send(
-                {"command": "import", "scope": self.scope.get(), "units": units}, imported
-            )
-
-    def close(self):
-        self.closed = True
         self.destroy()
 
 

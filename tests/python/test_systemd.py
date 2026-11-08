@@ -21,24 +21,17 @@ pytestmark = [
 ]
 
 
-async def test_real_user_jobs_gates_partial_restart_cancel_and_external_events(tmp_path):
+async def test_real_user_stage_jobs_partial_restart_cancel_and_external_events(tmp_path):
     prefix = "devdash-py-it-" + uuid.uuid4().hex[:10]
     units = {key: f"{prefix}-{key}.service" for key in ("camera", "imu", "detector", "planner")}
     config = Config(
         dict(
             workloads={key: dict(backend="systemd", unit=unit) for key, unit in units.items()},
-            gates={"ready": {"type": "manual"}},
-            groups={
-                "robot": {
-                    "steps": [
-                        {"parallel": ["camera", "imu"]},
-                        {"gate": "ready"},
-                        {"group": "perception"},
-                        {"workload": "planner"},
-                    ]
-                },
-                "perception": {"steps": [{"workload": "detector"}]},
-            },
+            stages=[
+                dict(id="sensors", workloads=["camera", "imu"]),
+                dict(id="perception", workloads=["detector"]),
+                dict(id="control", workloads=["planner"]),
+            ],
         )
     )
     backend = Backends(config)
@@ -58,13 +51,22 @@ async def test_real_user_jobs_gates_partial_restart_cancel_and_external_events(t
         await session.call("Reload")
         await engine.poll()
         assert all(obs["state"] == "inactive" for obs in engine.observations.values())
-        engine.launch("robot", True, "start")
-        await until(lambda: engine.run["waiting_gate"] == "ready", timeout=15)
+        engine.launch("sensors", True, "start")
+        assert (await engine.wait())["status"] == "completed"
         await engine.poll()
         assert engine.observations["camera"]["state"] == "active"
         assert engine.observations["detector"]["state"] == "inactive"
-        engine.approve("ready")
-        assert (await engine.wait())["status"] == "completed"
+        initial = engine.observations["camera"]["invocation_id"]
+        engine.launch("sensors", True, "start")
+        await engine.wait()
+        await engine.poll()
+        assert (
+            engine.observations["camera"]["invocation_id"] == initial
+        )  # Active Start is idempotent.
+        engine.launch_next("sensors")
+        await engine.wait()
+        engine.launch_next("perception")
+        await engine.wait()
         await engine.poll()
         assert all(obs["state"] == "active" for obs in engine.observations.values())
         old = {key: obs["invocation_id"] for key, obs in engine.observations.items()}
@@ -73,11 +75,9 @@ async def test_real_user_jobs_gates_partial_restart_cancel_and_external_events(t
         await engine.poll()
         assert engine.observations["camera"]["invocation_id"] == old["camera"]
         assert engine.observations["detector"]["invocation_id"] != old["detector"]
-        engine.launch("robot", True, "restart")
+        engine.launch("sensors", True, "restart")
         assert (await engine.wait())["status"] == "completed"
-        progress = engine.run["progress"]
-        assert progress[0]["step"] == "planner" and progress[0]["action"] == "stop"
-        assert progress[1]["step"] == "detector" and progress[1]["action"] == "stop"
+        assert all(p["action"] == "restart" for p in engine.run["progress"])
         # Another client requests a job directly, without devdash correlation.
         external = Backends(config)
         await external.start()
@@ -95,19 +95,18 @@ async def test_real_user_jobs_gates_partial_restart_cancel_and_external_events(t
         )
         await engine.poll()
         assert engine.observations["planner"]["state"] == "inactive"
-        engine.launch("robot", True, "reinitialize")
-        await until(lambda: engine.run["waiting_gate"] == "ready", timeout=15)
+        engine.launch("perception", True, "stop")
         engine.request_cancel()
         assert (await engine.wait())["status"] == "cancelled"
         await engine.poll()
-        assert engine.observations["detector"]["state"] == "inactive"
+        assert engine.observations["detector"]["state"] == "active"
         assert any(
             e["correlation"] == "requested" and e["job_result"] == "done" for e in engine.events
         )
         # Reload must invalidate a previously published report.
-        await engine.inspect("robot", "start")
+        await engine.inspect("sensors", "start")
         await session.call("Reload")
-        await until(lambda: engine.snapshot()["inspections"]["robot"]["stale"])
+        await until(lambda: engine.snapshot()["inspections"]["sensors"]["stale"])
     finally:
         for work in config.workloads.values():
             try:
@@ -182,12 +181,12 @@ async def test_dependencies_events_and_launch_children(config, tmp_path):
             created.append(path)
         await manager.call("Reload")
         graph = await backend.dependencies(seeds)
-        report = inspect(config, "robot", "start", set(), graph)
+        report = inspect(config, "sensors", "start", graph)
         assert any(
-            d["code"] == "gate_bypass" and any(bridge in path for path in d["path"])
+            d["code"] == "outside_start" and any(bridge in path for path in d["path"])
             for d in report["diagnostics"]
         ), report
-        partial = inspect(config, "perception", "stop", set(), graph)
+        partial = inspect(config, "perception", "stop", graph)
         assert any(
             d["code"] == "outside_stop" and {"scope": "user", "unit": unit["planner"]} in d["units"]
             for d in partial["diagnostics"]
@@ -196,8 +195,11 @@ async def test_dependencies_events_and_launch_children(config, tmp_path):
             f"[Unit]\nAfter={unit['planner']}\n[Service]\nExecStart=/bin/sleep 3600\n"
         )
         await manager.call("Reload")
-        fresh = inspect(config, "robot", "start", set(), await backend.dependencies(seeds))
-        assert not any(d["code"] == "gate_bypass" for d in fresh["diagnostics"])
+        fresh = inspect(config, "sensors", "start", await backend.dependencies(seeds))
+        assert not any(
+            d["code"] == "outside_start" and any(bridge in path for path in d["path"])
+            for d in fresh["diagnostics"]
+        )
         assert any(d["code"] == "ordering" for d in fresh["diagnostics"])
         await engine.poll()
         await external.operate(config.workloads["detector"], "start")
@@ -206,7 +208,7 @@ async def test_dependencies_events_and_launch_children(config, tmp_path):
         assert engine.observations["detector"]["state"] == "active"
         assert engine.run["status"] == ""  # Observation never initiates repair.
         assert any(
-            e["kind"] == "gate_mismatch" and e["workload"] == "detector" for e in engine.events
+            e["kind"] == "state_changed" and e["workload"] == "detector" for e in engine.events
         )
         assert any(
             e["kind"] == "job" and e["correlation"] == "unrelated" and e["workload"] == "detector"
@@ -286,19 +288,18 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
     runtime_name = prefix + "-core"
     runtime = Path(os.environ["XDG_RUNTIME_DIR"])
     socket = runtime / runtime_name / "core.sock"
-    config_path, state_path = tmp_path / "config.yaml", tmp_path / "approvals.json"
+    config_path = tmp_path / "config.yaml"
     config = Config(
         {
             "workloads": {"worker": {"backend": "systemd", "unit": worker_name}},
-            "groups": {"robot": {"steps": [{"workload": "worker"}, {"gate": "ready"}]}},
-            "gates": {"ready": {"type": "manual"}},
+            "stages": [dict(id="robot", workloads=["worker"])],
         }
     )
     config_path.write_text(yaml.safe_dump(config.json()))
     body = template("core")
     lines = body.splitlines()
     lines = [
-        f'ExecStart="{sys.executable}" -I -m devdash --socket "%t/{runtime_name}/core.sock" daemon --config "{config_path}" --state "{state_path}"'
+        f'ExecStart="{sys.executable}" -I -m devdash --socket "%t/{runtime_name}/core.sock" daemon --config "{config_path}"'
         if line.startswith("ExecStart=")
         else f"RuntimeDirectory={runtime_name}"
         if line.startswith("RuntimeDirectory=")
@@ -363,16 +364,16 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
         initial = await core_when(
             lambda value: value["observations"].get("worker", {}).get("state") == "active"
         )
-        assert initial["run"]["status"] == "" and not initial["approved"]
+        assert initial["run"]["status"] == "" and "approved" not in initial
         assert core_name not in await request(socket, {"command": "scan", "scope": "user"})
         before_import = config_path.read_text()
         with pytest.raises(RuntimeError, match="not available|cannot manage itself"):
-            await request(socket, {"command": "import", "scope": "user", "units": [core_name]})
+            await request(socket, {"command": "resolve", "scope": "user", "unit": core_name})
         assert config_path.read_text() == before_import
         assert socket.stat().st_mode & 0o777 == 0o600
         await unchanged(original)
-        await request(socket, dict(command="operate", target="robot", group=True, action="start"))
-        await core_when(lambda value: value["run"]["waiting_gate"] == "ready")
+        await request(socket, dict(command="operate", target="robot", kind="stage", action="start"))
+        await core_when(lambda value: value["run"]["status"] == "completed")
         await manager.call("KillUnit", "ssi", [core_name, "main", signal.SIGKILL])
         # Restart=on-failure performs this restart, not devdash.
         recovered = await core_when(
@@ -381,7 +382,7 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
                 and value["observations"].get("worker", {}).get("state") == "active"
             )
         )
-        assert recovered["run"]["status"] == "" and not recovered["approved"]
+        assert recovered["run"]["status"] == "" and "approved" not in recovered
         await unchanged(original)
         await control_core("stop")
         assert not socket.exists()
@@ -393,18 +394,16 @@ async def test_resident_core_user_unit_restart_does_not_touch_workload(tmp_path)
         assert restarted["core"]["instance"] != recovered["core"]["instance"]
         assert restarted["run"]["status"] == ""
         await unchanged(original)
-        await request(socket, dict(command="operate", target="robot", group=True, action="start"))
-        await core_when(lambda value: value["run"]["waiting_gate"] == "ready")
-        await request(socket, {"command": "approve", "gate": "ready"})
+        await request(socket, dict(command="operate", target="robot", kind="stage", action="start"))
+        await core_when(lambda value: value["run"]["status"] == "completed")
         await core_when(lambda value: value["run"]["status"] == "completed")
         await control_core("stop")
         await control_core("start")
         restored = await core_when(
             lambda value: value["observations"].get("worker", {}).get("state") == "active"
         )
-        assert restored["approved"] == ["ready"] and restored["run"]["status"] == ""
+        assert "approved" not in restored and restored["run"]["status"] == ""
         await unchanged(original)
-        assert state_path.stat().st_mode & 0o777 == 0o600
     finally:
         errors = []
         for name in (core_name, worker_name):

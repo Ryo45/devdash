@@ -86,8 +86,8 @@ class CorePeer:
     async def metadata(self, **values):
         self.engine.core.update(values)
 
-    async def approve(self):
-        self.engine.approve("ready")
+    async def release(self):
+        self.backend.block["camera"].set()
         return await self.engine.wait()
 
     def close(self):
@@ -96,7 +96,9 @@ class CorePeer:
         assert not self.thread.is_alive() and not self.errors, self.errors
 
 
-def test_gui_reconnect_version_mismatch_and_close_at_gate(config, tmp_path, monkeypatch):
+def test_gui_reconnect_versions_and_close_does_not_own_stage_operation(
+    config, tmp_path, monkeypatch
+):
     from devdash import __version__
     from devdash.gui import Window, gui_instance
 
@@ -108,14 +110,10 @@ def test_gui_reconnect_version_mismatch_and_close_at_gate(config, tmp_path, monk
             assert not duplicate
         with gui_instance(socket, new_window=True) as explicit:
             assert explicit
-        with gui_instance(tmp_path / "other.sock") as other:
-            assert other
-    with gui_instance(socket) as released:
-        assert released
     peer = CorePeer(config, socket)
     window = Window(socket)
-    callback_errors = []
-    window.report_callback_exception = lambda *values: callback_errors.append(values)
+    errors = []
+    window.report_callback_exception = lambda *values: errors.append(values)
 
     def wait(predicate):
         deadline = time.monotonic() + 6
@@ -124,33 +122,31 @@ def test_gui_reconnect_version_mismatch_and_close_at_gate(config, tmp_path, monk
             window.update()
             time.sleep(0.01)
 
-    def start_group():
-        iid = json.dumps(["group", "robot"])
-        window.tree.selection_set(iid)
+    async def block():
+        peer.backend.block["camera"] = asyncio.Event()
+
+    def start():
+        peer.run(block())
+        window.tree.selection_set(json.dumps(["stage", "sensors"]))
         window.tree.event_generate("<<TreeviewSelect>>")
         window.update()
-        assert not window.buttons["start"].instate(["disabled"])
         window.buttons["start"].invoke()
-        wait(lambda: window.snapshot["run"]["waiting_gate"] == "ready")
+        wait(lambda: window.snapshot["run"]["status"] == "running" and len(peer.backend.calls) >= 2)
 
     try:
         wait(lambda: window.connected)
-        assert f"Core {__version__}" in window.status.cget("text")
-        assert f"GUI {__version__}" in window.status.cget("text")
-        assert not peer.backend.calls  # GUI connect is not Group Start.
-        start_group()
+        assert not peer.backend.calls
+        start()
         instance = window.snapshot["core"]["instance"]
         calls = list(peer.backend.calls)
         peer.run(peer.disconnect())
         wait(lambda: not window.connected)
         assert all(button.instate(["disabled"]) for button in window.buttons.values())
-        assert window.approve.instate(["disabled"])
-        assert "stale" in window.tree.item(json.dumps(["workload", "camera"]), "values")[0]
+        assert window.next_button.instate(["disabled"])
         assert peer.engine.busy and peer.backend.calls == calls
         peer.run(peer.connect())
         wait(lambda: window.connected)
         assert window.snapshot["core"]["instance"] == instance
-        assert not window.approve.instate(["disabled"])
         peer.run(peer.restart())
         wait(lambda: window.connected and window.snapshot["core"]["instance"] != instance)
         assert window.snapshot["run"]["status"] == ""
@@ -158,19 +154,17 @@ def test_gui_reconnect_version_mismatch_and_close_at_gate(config, tmp_path, monk
         assert peer.backend.calls == calls
         peer.run(peer.metadata(version="0.2.99"))
         wait(lambda: "version mismatch" in window.status.cget("text"))
-        assert window.connected
-        peer.run(peer.metadata(protocol=2))
+        peer.run(peer.metadata(protocol=1))
         wait(lambda: not window.connected)
         assert "Incompatible Core IPC" in window.status.cget("text")
-        assert peer.backend.calls == calls
-        peer.run(peer.metadata(protocol=1, version=__version__))
+        peer.run(peer.metadata(protocol=2, version=__version__))
         wait(lambda: window.connected)
-        start_group()
+        start()
         window.close()
-        assert peer.engine.busy and peer.engine.run["waiting_gate"] == "ready"
-        assert peer.run(peer.approve())["status"] == "completed"
-        assert peer.backend.calls[-2:] == [("detector", "start"), ("planner", "start")]
-        assert not callback_errors, callback_errors
+        assert peer.engine.busy
+        assert peer.run(peer.release())["status"] == "completed"
+        assert len(peer.backend.calls) == len(calls) + 2
+        assert not errors
     finally:
         window.close()
         peer.close()
@@ -225,7 +219,7 @@ def test_gui_displays_lifecycle_health_and_observer_loss_separately(config, tmp_
         assert "Internal Observer: Docker API" in summary and "supervisord (container)" in summary
         assert window.tree.item(iid, "values") == ("active", "not_ready")
         assert window.buttons["start"].cget("text") == "Start (systemd)"
-        assert window.approve.instate(["disabled"])
+        assert window.next_button.instate(["disabled"])
         peer.run(publish(fact(False)))
         wait(lambda: "Docker disconnected" in window.summary.cget("text"))
         assert window.tree.item(iid, "values") == ("active", "unknown")

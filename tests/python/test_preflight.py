@@ -1,109 +1,59 @@
-"""Inspection is an input snapshot, never an execution DAG."""
+"""Fresh inspection remains separate from Stage dispatch."""
 
 import asyncio
-import copy
 
 import pytest
 
-from devdash.model import UnitKey
 
-
-async def test_reinspected_before_every_operation_and_blocked_before_jobs(engine, backend):
-    assert not (await engine.inspect("robot", "start"))["diagnostics"]
-    backend.graph.edges.add(
-        (UnitKey("user", "camera.service"), "Requires", UnitKey("user", "detector.service"))
-    )
-    engine.launch("robot", True, "start")
-    assert (await engine.wait())["status"] == "failed"
-    assert not backend.calls
-    backend.graph.edges.clear()
-    engine.launch("perception", True, "start")
-    assert (await engine.wait())["status"] == "completed"
-    assert backend.calls == [("detector", "start")]
-
-
-@pytest.fixture
-def paused_inspection(backend):
-    entered, resume = asyncio.Event(), asyncio.Event()
-
-    async def dependencies(seeds):
-        snapshot = copy.deepcopy(backend.graph)
-        snapshot.inspected |= seeds
-        entered.set()
-        await resume.wait()
-        return snapshot
-
-    backend.dependencies = dependencies
-    return entered, resume
-
-
-async def test_cancel_during_preflight_preserves_approvals_and_issues_no_jobs(
-    engine, backend, paused_inspection
-):
-    entered, resume = paused_inspection
-    engine.approve("ready")
-    engine.launch("robot", True, "reinitialize")
-    await asyncio.wait_for(entered.wait(), 2)
-    engine.request_cancel()
-    resume.set()
-    assert (await engine.wait())["status"] == "cancelled"
-    assert engine.approved == {"ready"} and not backend.calls
-
-
-async def test_invalidated_refresh_cannot_publish_old_snapshot_as_fresh(
-    engine, backend, paused_inspection
-):
-    entered, resume = paused_inspection
-    resume.set()
-    await engine.inspect("robot", "start")
-    resume.clear()
-    entered.clear()
-    refresh = asyncio.create_task(engine.inspect("robot", "start"))
-    await asyncio.wait_for(entered.wait(), 2)
-    engine.invalidate()
-    backend.graph.edges.add(
-        (UnitKey("user", "camera.service"), "Requires", UnitKey("user", "detector.service"))
-    )
-    resume.set()
-    report = await refresh
-    assert report["stale"] and engine.snapshot()["inspections"]["robot"]["stale"]
-    fresh = await engine.inspect("robot", "start")
-    assert not fresh["stale"]
-    assert any(d["code"] == "gate_bypass" for d in fresh["diagnostics"])
-
-
-async def test_approval_changes_invalidate_cached_inspection(engine):
-    await engine.inspect("robot", "start")
-    assert not engine.snapshot()["inspections"]["robot"]["stale"]
-    engine.approve("ready")
-    assert engine.snapshot()["inspections"]["robot"]["stale"]
-
-
-async def test_operation_inspection_seeds_only_selected_scope(engine, backend):
-    seen = []
+async def test_cancel_during_inspection_issues_nothing(engine, backend):
+    entered, release = asyncio.Event(), asyncio.Event()
     original = backend.dependencies
 
-    async def dependencies(seeds):
-        seen.append(set(seeds))
+    async def inspect(seeds):
+        entered.set()
+        await release.wait()
         return await original(seeds)
 
-    backend.dependencies = dependencies
-    report = await engine.inspect("perception", "start")
-    assert seen == [{UnitKey("user", "detector.service")}]
-    assert report["requested_units"] == [{"scope": "user", "unit": "detector.service"}]
+    backend.dependencies = inspect
+    engine.launch("sensors", True, "start")
+    await entered.wait()
+    engine.request_cancel()
+    release.set()
+    assert (await engine.wait())["status"] == "cancelled"
+    assert not backend.calls
 
 
-@pytest.mark.parametrize("change", ["inputs", "manager_revision", "approval"])
-async def test_changed_preflight_is_refused_before_jobs(engine, backend, paused_inspection, change):
-    entered, resume = paused_inspection
-    engine.launch("robot", True, "start")
-    await asyncio.wait_for(entered.wait(), 2)
-    if change == "inputs":
-        engine.invalidate()
-    elif change == "manager_revision":
-        backend.revision += 1
+@pytest.mark.parametrize("failure", ["stale", "incomplete", "changed"])
+async def test_uncertain_preflight_blocks_stage_but_not_direct_workload(engine, backend, failure):
+    if failure == "stale":
+        backend.graph.stale = True
+    elif failure == "incomplete":
+        from devdash.inspection import Graph
+
+        async def missing(seeds):
+            return Graph(incomplete=["manager metadata unavailable"])
+
+        backend.dependencies = missing
     else:
-        engine.approve("ready")
-    resume.set()
+        original = backend.dependencies
+
+        async def changed(seeds):
+            result = await original(seeds)
+            backend.revision += 1
+            return result
+
+        backend.dependencies = changed
+    engine.launch("sensors", True, "start")
     assert (await engine.wait())["status"] == "failed"
-    assert "stale" in engine.run["error"] and not backend.calls
+    assert not backend.calls
+    engine.launch("camera", False, "start")
+    assert (await engine.wait())["status"] == "completed"
+    assert backend.calls == [("camera", "start")]
+
+
+async def test_new_stage_operation_inspects_again_and_reports_invalidate(engine, backend):
+    await engine.inspect("sensors", "start")
+    backend.revision += 1
+    assert engine.snapshot()["inspections"]["sensors"]["stale"]
+    engine.launch("sensors", True, "start")
+    assert (await engine.wait())["status"] == "completed"

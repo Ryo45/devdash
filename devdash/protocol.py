@@ -2,9 +2,9 @@
 
 from . import __version__
 
-CORE_PROTOCOL = 1
+CORE_PROTOCOL = 2
 BRIDGE_PROTOCOL = 1
-MUTATIONS = frozenset({"operate", "child", "approve", "cancel", "import"})
+MUTATIONS = frozenset({"operate", "next", "child", "cancel", "reload"})
 
 
 class CompatibilityError(RuntimeError):

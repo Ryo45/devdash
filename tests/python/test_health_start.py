@@ -1,4 +1,4 @@
-"""Real systemd Start job waits on Docker Health; devdash only sequences/approves."""
+"""Real systemd Start job waits on Docker Health; devdash explicitly requests Stages."""
 
 import os
 
@@ -15,48 +15,41 @@ pytestmark = [
 ]
 
 
-async def test_health_start_then_manual_continue_and_group_restart_stop(health_scenario):
+async def test_health_start_then_explicit_next_and_stage_restart_stop(health_scenario):
     h = await health_scenario()
-    await h.command("operate", target="robot", group=True, action="start")
+    await h.command("operate", target="robot", kind="stage", action="start")
     waiting = await h.health_wait()
     assert waiting["readiness"]["state"] == "not_ready"
-    assert h.engine.run["waiting_gate"] is None and h.engine.busy
+    assert h.engine.busy
     assert h.jobs() == [] and (await h.observe("next"))["state"] == "inactive"
     # A competing devdash Stop/Restart is rejected, rather than cancelling the issued job.
     for action in ("stop", "restart"):
         with pytest.raises(RuntimeError, match="Another operation"):
-            await h.command("operate", target="robot", group=True, action=action)
+            await h.command("operate", target="robot", kind="stage", action=action)
     assert len(h.calls) == 1
     h.release()
 
-    async def approval_wait():
-        return h.engine.run["waiting_gate"] == "operator"
-
-    await eventually(approval_wait)
+    assert (await h.done())["status"] == "completed"
     value = await h.observe()
     assert value["state"] == "active" and value["health"] == "healthy"
     assert any(c["kind"] == "process" for c in value["children"])
     assert any(c["id"] == "worker:worker" and c["state"] == "RUNNING" for c in value["children"])
     assert h.jobs() == ["done"] and (await h.observe("next"))["state"] == "inactive"
     assert h.engine.run["progress"][0]["status"] == "completed"
-    await h.command("approve", gate="operator")
+    await h.command("next", after="robot")
     assert (await h.done())["status"] == "completed"
     assert (await h.observe("next"))["state"] == "active"
     initial = value["internal"]["invocation_id"]
     h.calls.clear()
-    await h.command("operate", target="robot", group=True, action="restart")
+    await h.command("operate", target="robot", kind="stage", action="restart")
     assert (await h.done())["status"] == "completed"
-    assert h.calls == [
-        (h.units["next"], "stop"),
-        (h.units["container"], "stop"),
-        (h.units["container"], "start"),
-        (h.units["next"], "start"),
-    ]
-    assert "operator" in h.engine.approved
+    assert h.calls == [(h.units["container"], "restart")]
     assert (await h.observe())["internal"]["invocation_id"] != initial
     await h.record("success-and-restart")
     h.calls.clear()
-    await h.command("operate", target="robot", group=True, action="stop")
+    await h.command("operate", target="next", kind="stage", action="stop")
+    assert (await h.done())["status"] == "completed"
+    await h.command("operate", target="robot", kind="stage", action="stop")
     assert (await h.done())["status"] == "completed"
     assert h.calls == [(h.units["next"], "stop"), (h.units["container"], "stop")]
     value = await h.observe()
@@ -80,15 +73,14 @@ async def test_health_start_failure_never_advances_and_unit_cleans_up(
     service_result,
 ):
     h = await health_scenario(**options)
-    await h.command("operate", target="robot", group=True, action="start")
+    await h.command("operate", target="robot", kind="stage", action="start")
     if failure == "container-exit":
         await h.health_wait()
         await h.command_process(h.docker, "kill", h.name)
     run = await h.done()
     assert run["status"] == "failed" and f"job result {job_result}" in run["error"]
     assert h.jobs() == [job_result]
-    assert run["waiting_gate"] is None and "operator" not in h.engine.approved
-    assert [p["status"] for p in run["progress"]] == ["failed", "skipped", "skipped"]
+    assert [p["status"] for p in run["progress"]] == ["failed"]
     assert h.calls == [(h.units["container"], "start")]  # No devdash rollback/cleanup.
     assert (await h.observe("next"))["state"] == "inactive"
     evidence = await h.record(failure)
@@ -102,7 +94,7 @@ async def test_cancel_drains_issued_health_wait_and_never_starts_next(
     health_scenario, fail_after_cancel
 ):
     h = await health_scenario()
-    await h.command("operate", target="robot", group=True, action="start")
+    await h.command("operate", target="robot", kind="stage", action="start")
     await h.health_wait()
     jobs = set(h.backend.systemd.session("user").jobs)
     reply = await h.command("cancel")
@@ -117,8 +109,6 @@ async def test_cancel_drains_issued_health_wait_and_never_starts_next(
     assert h.jobs() == (["failed"] if fail_after_cancel else ["done"])
     assert [p["status"] for p in run["progress"]] == [
         "failed" if fail_after_cancel else "completed",
-        "skipped",
-        "skipped",
     ]
     assert h.calls == [(h.units["container"], "start")]
     assert (await h.observe("next"))["state"] == "inactive"
@@ -133,7 +123,7 @@ async def test_cancel_drains_issued_health_wait_and_never_starts_next(
 @pytest.mark.parametrize("external", ["stop", "restart"])
 async def test_external_stop_or_restart_during_pending_start(health_scenario, external):
     h = await health_scenario()
-    await h.command("operate", target="robot", group=True, action="start")
+    await h.command("operate", target="robot", kind="stage", action="start")
     first = await h.health_wait()
     pending = set(h.backend.systemd.session("user").jobs)
     await h.command_process("systemctl", "--user", "--no-block", external, h.units["container"])
@@ -156,18 +146,11 @@ async def test_external_stop_or_restart_during_pending_start(health_scenario, ex
         print("Restart kept original tracked job:", same_job, flush=True)
         h.release()
 
-        async def gate_or_failure():
-            return h.engine.run["waiting_gate"] == "operator" or h.engine.run["status"] == "failed"
-
-        await eventually(gate_or_failure)
+        run = await h.done()
         await h.record("external-restart")
         assert (await h.observe("next"))["state"] == "inactive"
-        if h.engine.run["waiting_gate"]:
-            assert h.jobs() == ["done"]
-            await h.command("cancel")
-            assert (await h.done())["status"] == "cancelled"
-        else:
-            assert "job result canceled" in h.engine.run["error"]
+        assert run["status"] in ("completed", "failed")
+        assert h.jobs() == (["done"] if run["status"] == "completed" else ["canceled"])
     else:
         run = await h.done()
         assert run["status"] == "failed" and "job result canceled" in run["error"]
@@ -184,5 +167,56 @@ async def test_external_stop_or_restart_during_pending_start(health_scenario, ex
         await eventually(settled)
         await h.record("external-stop")
     assert h.calls == [(h.units["container"], "start")]
-    assert "operator" not in h.engine.approved
     assert (await h.observe("next"))["state"] == "inactive"
+
+
+async def test_generated_requisite_after_refuses_later_stage_without_pulling_prerequisite(
+    health_scenario, tmp_path
+):
+    """Explicit test-only application of generated drop-in; generator never reloads host."""
+    import shutil
+
+    from devdash.generator import generate
+    from devdash.model import Config
+
+    h = await health_scenario()
+    raw = h.config.json()
+    raw["dependencies"] = {"next": ["container"]}
+    candidate = Config(raw)
+    plan = generate(candidate, tmp_path / "generated")
+    relative = f"systemd/user/{h.units['next']}.d/60-devdash-stage-dependencies.conf"
+    assert relative in plan["files"]
+    target = h.runtime / f"{h.units['next']}.d" / "60-devdash-stage-dependencies.conf"
+    target.parent.mkdir()
+    try:
+        # Application is explicit and confined to our unique dummy unit.
+        shutil.copyfile(tmp_path / "generated/current" / relative, target)
+        await h.backend.systemd.session("user").call("Reload")
+        h.config = h.engine.config = h.backend.systemd.config = candidate
+        report = await h.engine.inspect("next", "start")
+        assert not any(d["level"] == "error" for d in report["diagnostics"]), report
+        await h.command("operate", target="next", kind="stage", action="start")
+        failed = await h.done()
+        assert failed["status"] == "failed" and "dependency" in failed["error"].lower()
+        assert (await h.observe())["state"] == "inactive"  # Requisite did not pull it in.
+        assert (await h.observe("next"))["state"] == "inactive"
+        h.release()
+        await h.command("operate", target="robot", kind="stage", action="start")
+        assert (await h.done())["status"] == "completed"
+        assert (await h.observe("next"))["state"] == "inactive"
+        await h.command("next", after="robot")
+        assert (await h.done())["status"] == "completed"
+        assert (await h.observe("next"))["state"] == "active"
+        report = await h.engine.inspect("robot", "stop")
+        assert any(d["code"] == "outside_stop" for d in report["diagnostics"])
+        await h.record("generated-requisite-after")
+        # Requisite is not an isolation boundary: explicit prerequisite Stop can propagate.
+        await h.command("operate", target="robot", kind="stage", action="stop")
+        assert (await h.done())["status"] == "completed"
+        assert (await h.observe("next"))["state"] == "inactive"
+    finally:
+        # Stop dependents before removing their definition; keep fixture cleanup reproducible.
+        await h.command_process("systemctl", "--user", "stop", h.units["next"], check=False)
+        target.unlink(missing_ok=True)
+        target.parent.rmdir()
+        await h.backend.systemd.session("user").call("Reload")

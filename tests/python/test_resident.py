@@ -24,7 +24,7 @@ async def snapshot_when(socket, predicate):
 
 
 @pytest.mark.parametrize("core_signal", [signal.SIGTERM, signal.SIGKILL])
-@pytest.mark.parametrize("stage", ["gate", "job"])
+@pytest.mark.parametrize("stage", ["idle", "job"])
 async def test_core_restart_observes_without_start_replay_or_stop(
     tmp_path, monkeypatch, core_signal, stage
 ):
@@ -36,7 +36,7 @@ async def test_core_restart_observes_without_start_replay_or_stop(
         manager.active["same.service"] = True  # Already running before devdash.
         config = tmp_path / "config.yaml"
         config.write_text(yaml.safe_dump(harness.engine.config.json()))
-        socket, state = tmp_path / "private/core.sock", tmp_path / "approvals.json"
+        socket = tmp_path / "private/core.sock"
         environment = dict(
             os.environ,
             DBUS_SESSION_BUS_ADDRESS=harness.buses["user"].address,
@@ -56,8 +56,6 @@ async def test_core_restart_observes_without_start_replay_or_stop(
                 "daemon",
                 "--config",
                 str(config),
-                "--state",
-                str(state),
                 env=environment,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -74,16 +72,18 @@ async def test_core_restart_observes_without_start_replay_or_stop(
         if stage == "job":
             manager.hold_job = True
         accepted = await request(
-            socket, dict(command="operate", target="robot", group=True, action="start")
+            socket, dict(command="operate", target="robot", kind="stage", action="start")
         )
         assert accepted["run"]["status"] in ("running", "cancelling")
         before = await snapshot_when(
             socket,
             lambda value: (
-                value["run"]["waiting_gate"] == "ready" if stage == "gate" else bool(manager.calls)
+                value["run"]["status"] == "completed" if stage == "idle" else bool(manager.calls)
             ),
         )
-        assert before["run"]["status"] == "running"  # Accepted never means succeeded.
+        assert before["run"]["status"] == (
+            "running" if stage == "job" else "completed"
+        )  # Accepted never means succeeded.
         assert manager.calls == [("StartUnit", "same.service")]
         process.send_signal(core_signal)
         await asyncio.wait_for(process.wait(), 5)
@@ -95,7 +95,7 @@ async def test_core_restart_observes_without_start_replay_or_stop(
         )
         assert restored["core"]["instance"] != initial["core"]["instance"]
         assert restored["run"]["status"] == "" and restored["run"]["progress"] == []
-        assert not restored["approved"] and not restored["run"]["waiting_gate"]
+        assert "approved" not in restored and "waiting_gate" not in restored["run"]
         assert manager.calls == calls  # No resume, stop, restart, or repair.
         assert harness.managers["system"].calls == []
         assert restored["observations"]["after"]["state"] == "inactive"

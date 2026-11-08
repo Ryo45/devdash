@@ -1,5 +1,7 @@
 # Rust版テストのPython移植と書きやすさ
 
+> 比較元Coordinator方式（main `d143e97`）の記録です。このStageブランチの現行仕様・検証は[比較レポート](stage-comparison.md)と[設定手順](stage-configuration.md)を参照してください。旧操作の説明をStage版へ適用しないでください。
+
 この文書はテスト復元時（118ケース）の記録です。その後、[常駐運用・互換性](resident-operation.md)と[自己管理防止](self-protection.md)のテストを追加し、[Lifecycle/Observer分離](lifecycle-observer-gates.md)も含め、現在は237ケースです。
 
 比較元はRust版 `35ecdea`（`archive/rust-gpui`）です。`tests/*.rs`と`src/docker.rs`・`src/systemd_events.rs`内のテスト、合計65本を照合しました。

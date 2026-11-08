@@ -16,19 +16,11 @@ def config():
                 key: dict(backend="systemd", unit=f"{key}.service")
                 for key in ("camera", "imu", "detector", "planner")
             },
-            gates={"ready": {"type": "manual"}},
-            groups={
-                "robot": {
-                    "steps": [
-                        {"group": "sensors"},
-                        {"gate": "ready"},
-                        {"group": "perception"},
-                        {"workload": "planner"},
-                    ]
-                },
-                "sensors": {"steps": [{"parallel": ["camera", "imu"]}]},
-                "perception": {"steps": [{"workload": "detector"}]},
-            },
+            stages=[
+                {"id": "sensors", "workloads": ["camera", "imu"]},
+                {"id": "perception", "workloads": ["detector"]},
+                {"id": "control", "workloads": ["planner"]},
+            ],
         )
     )
 
@@ -54,7 +46,7 @@ class Fake:
     def recent(self, work):
         return False
 
-    async def operate(self, work, action, lease=None):
+    async def operate(self, work, action, lease=None, cancel=None):
         key = work["unit"].removesuffix(".service")
         self.calls.append((key, action))
         self.started.set()
@@ -129,3 +121,12 @@ async def health_scenario(tmp_path, monkeypatch):
         for scenario in reversed(scenarios):
             await scenario.close()
         forbidden.assert_not_awaited()
+
+
+@pytest.fixture(autouse=True)
+def collect_destroyed_tk_on_main_thread(request):
+    yield
+    if request.node.get_closest_marker("gui"):
+        import gc
+
+        gc.collect()

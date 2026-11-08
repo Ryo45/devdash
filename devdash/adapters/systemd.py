@@ -293,7 +293,7 @@ class Session:
         reject_application_service(path, unit, service, self.own_path)
         return path, unit
 
-    async def operate(self, work, action, lease):
+    async def operate(self, work, action, lease, cancel=None):
         # Pin before checking the captured old lease; a new manager never receives
         # the next operation from an interrupted sequence.
         if lease is not None and lease.is_set():
@@ -301,6 +301,8 @@ class Session:
         _, properties = await self.guarded(self.managed_unit(work["unit"]), timeout=5)
         unit = properties["Id"]
         self.check()
+        if cancel is not None and cancel.is_set():
+            return False  # No lifecycle D-Bus call has been issued yet.
         self.issuing[unit] = self.issuing.get(unit, 0) + 1
         path = None
         reply_known = False
@@ -458,9 +460,9 @@ class Systemd:
             or time.monotonic() - session.recent.get(unit, -100) < 5
         )
 
-    async def operate(self, work, action, lease=None):
+    async def operate(self, work, action, lease=None, cancel=None):
         session = self.session(work["scope"])
-        await session.operate(work, action, lease)
+        return await session.operate(work, action, lease, cancel)
 
     async def observe(self, work):
         session = self.session(work["scope"])
@@ -545,6 +547,8 @@ class Systemd:
                 )
                 canonical = UnitKey(key.scope, props["Id"])
                 graph.aliases[key] = canonical
+                for alias in props.get("Names", []):
+                    graph.aliases[UnitKey(key.scope, alias)] = canonical
                 if canonical in graph.inspected:
                     continue
                 if props.get("LoadState") != "loaded":

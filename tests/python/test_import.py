@@ -1,145 +1,173 @@
-"""Scan/Import restores the real IPC contract, not just Config helpers."""
+"""Scan is readonly; imports edit source, never a generated runtime file."""
 
 import asyncio
+import sys
 
 import pytest
 import yaml
-from conftest import until
+from conftest import Fake
 
 from devdash.engine import Engine
+from devdash.generator import generate
 from devdash.ipc import Server, request
 from devdash.model import Config
 
 
 @pytest.fixture
-async def ipc_fixture(config, backend, tmp_path):
-    path, socket = tmp_path / "config.yaml", tmp_path / "core.sock"
-    path.write_text(yaml.safe_dump(config.json(), sort_keys=False))
+async def editor_core(config, tmp_path):
+    source = tmp_path / "source.yaml"
+    source.write_text(yaml.safe_dump(config.json()))
+    generate(config, tmp_path / "output")
+    backend = Fake()
     backend.systemd = backend
     backend.config = config
     engine = Engine(config, backend)
-    service = Server(engine, path)
-    listener = await asyncio.start_unix_server(service.handle, path=str(socket))
+    server = Server(engine, tmp_path / "output/current/devdash.yaml")
+    socket = tmp_path / "core.sock"
+    listener = await asyncio.start_unix_server(server.handle, path=str(socket))
     try:
-        yield engine, backend, socket, path
+        yield engine, backend, server, socket, source
     finally:
         listener.close()
         await listener.wait_closed()
-        tasks = [t for t in [engine.task, *service.clients] if t and not t.done()]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in [engine.task, *server.clients]:
+            if task and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(t for t in [engine.task, *server.clients] if t), return_exceptions=True
+        )
 
 
-async def test_clients_disconnect_without_losing_gate_and_import_is_explicit(ipc_fixture):
-    engine, backend, socket, path = ipc_fixture
-    before = path.read_bytes()
-    assert await request(socket, {"command": "scan", "scope": "user"}) == ["importable.service"]
-    assert path.read_bytes() == before
-    assert "importable" not in engine.config.workloads
-    await request(socket, dict(command="operate", target="robot", group=True, action="start"))
-    await until(lambda: engine.run["waiting_gate"] == "ready")
-    assert (await request(socket, {"command": "snapshot"}))["run"]["waiting_gate"] == "ready"
-    with pytest.raises(RuntimeError, match="Another"):
-        await request(socket, dict(command="operate", target="camera", group=False, action="start"))
-    await request(socket, {"command": "approve", "gate": "ready"})
-    assert (await asyncio.wait_for(engine.wait(), 2))["status"] == "completed"
-    ids = await request(
-        socket, {"command": "import", "scope": "system", "units": ["importable.service"]}
+async def test_scan_and_source_import_preserve_runtime_until_explicit_generation_reload(
+    editor_core, tmp_path
+):
+    engine, backend, server, socket, source = editor_core
+    original = engine.config.json()
+    source_before = source.read_text()
+    failed = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "devdash",
+        "--socket",
+        str(socket),
+        "source-import",
+        str(source),
+        "system",
+        "importable.service",
+        "missing.service",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    assert ids == ["importable"]
-    assert Config.load(path).workloads["importable"]["scope"] == "system"
-    assert path.with_suffix(".yaml.bak").read_bytes() == before
-    after = path.read_bytes()
-    with pytest.raises(RuntimeError, match="not found|not available|Scan"):
-        await request(socket, {"command": "import", "scope": "user", "units": ["unknown.service"]})
-    assert path.read_bytes() == after
-    assert "unknown" not in engine.config.workloads
+    _, error = await failed.communicate()
+    assert failed.returncode != 0
+    assert b"Unit unavailable" in error
+    assert source.read_text() == source_before and engine.config.json() == original
+    assert await request(socket, dict(command="scan", scope="system")) == ["importable.service"]
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "devdash",
+        "--socket",
+        str(socket),
+        "source-import",
+        str(source),
+        "system",
+        "importable.service",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    output, error = await process.communicate()
+    assert process.returncode == 0, error.decode()
+    assert "importable" in Config.load(source).workloads
+    assert engine.config.json() == original and not backend.calls
+    generate(Config.load(source), tmp_path / "output")
+    assert engine.config.json() == original
+    await request(socket, dict(command="reload"))
+    assert "importable" in engine.config.workloads and not backend.calls and not engine.observations
+    with pytest.raises(RuntimeError, match="Unknown command"):
+        await request(socket, dict(command="import", scope="system", units=["other.service"]))
 
 
-async def test_import_batch_is_atomic_if_any_selected_unit_is_unknown(ipc_fixture):
-    engine, backend, socket, path = ipc_fixture
-    before = path.read_bytes()
-    with pytest.raises(RuntimeError):
-        await request(
-            socket,
-            {
-                "command": "import",
-                "scope": "user",
-                "units": ["importable.service", "unknown.service"],
-            },
-        )
-    assert path.read_bytes() == before and not path.with_suffix(".yaml.bak").exists()
-    assert "importable" not in engine.config.workloads
-
-
-async def test_import_preserves_manual_edits(ipc_fixture):
-    engine, backend, socket, path = ipc_fixture
-    edited = "# hand edited\n" + path.read_text().replace("camera.service", "edited.service")
-    path.write_text(edited)
-    with pytest.raises(RuntimeError, match="changed on disk"):
-        await request(
-            socket, {"command": "import", "scope": "user", "units": ["importable.service"]}
-        )
-    assert path.read_text() == edited and not path.with_suffix(".yaml.bak").exists()
-    assert engine.config.workloads["camera"]["unit"] == "camera.service"
-
-
-async def test_import_does_not_mutate_config_when_operation_starts_during_scan(ipc_fixture):
-    engine, backend, socket, path = ipc_fixture
+async def test_reload_rechecks_busy_after_resolution_and_preserves_config(
+    editor_core, config, tmp_path
+):
+    engine, backend, server, socket, source = editor_core
+    raw = config.json()
+    raw["workloads"]["new"] = dict(backend="systemd", unit="new.service")
+    generate(Config(raw), tmp_path / "output")
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def scan(scope):
-        entered.set()
-        await release.wait()
-        return ["importable.service"]
-
-    backend.scan = scan
-    before = path.read_bytes()
-    imported = asyncio.create_task(
-        request(socket, {"command": "import", "scope": "user", "units": ["importable.service"]})
-    )
-    try:
-        await asyncio.wait_for(entered.wait(), 2)
-        engine.launch("robot", True, "start")
-        await until(lambda: engine.run["waiting_gate"] == "ready")
-        release.set()
-        with pytest.raises(RuntimeError, match="during an operation"):
-            await imported
-        assert path.read_bytes() == before
-        assert "importable" not in engine.config.workloads
-    finally:
-        release.set()
-        await asyncio.gather(imported, return_exceptions=True)
-        if engine.busy:
-            engine.request_cancel()
-            await engine.wait()
-
-
-async def test_import_rechecks_busy_after_registration_resolution(ipc_fixture):
-    engine, backend, socket, path = ipc_fixture
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def validate(work):
+    async def resolving(work):
         entered.set()
         await release.wait()
 
-    backend.validate_registration = validate
-    before = path.read_bytes()
-    imported = asyncio.create_task(
-        request(socket, {"command": "import", "scope": "user", "units": ["importable.service"]})
-    )
-    try:
-        await asyncio.wait_for(entered.wait(), 2)
-        engine.launch("robot", True, "start")
-        await until(lambda: engine.run["waiting_gate"] == "ready")
-        release.set()
-        with pytest.raises(RuntimeError, match="during an operation"):
-            await imported
-        assert path.read_bytes() == before and "importable" not in engine.config.workloads
-    finally:
-        release.set()
-        await asyncio.gather(imported, return_exceptions=True)
-        if engine.busy:
-            engine.request_cancel()
-            await engine.wait()
+    backend.validate_registration = resolving
+    reload_task = asyncio.create_task(request(socket, dict(command="reload")))
+    await entered.wait()
+    backend.block["camera"] = asyncio.Event()
+    engine.launch("camera", False, "start")
+    release.set()
+    with pytest.raises(RuntimeError, match="changed"):
+        await reload_task
+    assert "new" not in engine.config.workloads
+    backend.block["camera"].set()
+    await engine.wait()
+
+
+async def test_client_disconnect_does_not_cancel_dispatched_stage(editor_core):
+    from conftest import until
+
+    engine, backend, _, socket, _ = editor_core
+    backend.block["camera"] = asyncio.Event()
+    await request(socket, dict(command="operate", kind="stage", target="sensors", action="start"))
+    await until(lambda: len(backend.calls) == 2)
+    assert (await request(socket, dict(command="snapshot")))["run"]["status"] == "running"
+    backend.block["camera"].set()
+    assert (await engine.wait())["status"] == "completed"
+
+
+async def test_reload_discards_inflight_observations_from_previous_configuration(
+    editor_core, config, tmp_path
+):
+    engine, backend, _, socket, _ = editor_core
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = backend.observe
+
+    async def blocked(work):
+        entered.set()
+        await release.wait()
+        return await original(work)
+
+    backend.observe = blocked
+    pending = asyncio.create_task(engine.poll())
+    await entered.wait()
+    raw = config.json()
+    raw["stages"] = []
+    raw["workloads"] = {}
+    generate(Config(raw), tmp_path / "output")
+    await request(socket, dict(command="reload"))
+    release.set()
+    await pending
+    assert not engine.observations and not engine.known
+    assert engine.config.workloads == {} and not backend.calls
+
+
+async def test_reload_clears_results_for_redefined_stage_without_lifecycle(editor_core, tmp_path):
+    engine, backend, _, socket, _ = editor_core
+    engine.launch("sensors", True, "start")
+    await engine.wait()
+    calls = list(backend.calls)
+    await request(socket, dict(command="reload"))
+    assert engine.run["status"] == "" and not engine.run["progress"]
+    assert backend.calls == calls
+
+
+async def test_old_gui_configuration_revision_cannot_start_new_next_target(editor_core):
+    from devdash.protocol import CompatibilityError
+
+    engine, backend, _, socket, _ = editor_core
+    revision = engine.config_revision
+    await request(socket, dict(command="reload"))
+    with pytest.raises(CompatibilityError, match="Configuration changed"):
+        await request(socket, dict(command="next", after="sensors", config_revision=revision))
+    assert not backend.calls

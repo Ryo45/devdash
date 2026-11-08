@@ -15,11 +15,8 @@ workloads:
   robot:
     backend: docker
     docker: {container: robot-dev}
-groups:
-  robot:
-    steps: [{workload: robot}, {gate: ready}]
-gates:
-  ready: {type: container_ready, workload: robot, timeout_ms: 80, interval_ms: 5}
+stages:
+  - {id: robot, workloads: [robot]}
 """
 
 
@@ -31,8 +28,8 @@ gates:
             "{container: robot-dev}",
             "{container: robot-dev, compose: {project: robot, service: camera}}",
         ),
-        ("{workload: robot}", '{workload: "worker:worker"}'),
-        ("workload: robot, timeout_ms", "workload: missing, timeout_ms"),
+        ("workloads: [robot]", 'workloads: ["worker:worker"]'),
+        ("id: robot", "id: invalid stage"),
     ],
 )
 def test_container_reference_validation_and_children_cannot_be_steps(replacement):
@@ -42,32 +39,21 @@ def test_container_reference_validation_and_children_cannot_be_steps(replacement
 
 
 @pytest.mark.parametrize("health", [None, "healthy", "unhealthy"])
-async def test_container_gate_is_independent_of_systemd_and_delegates_health(health):
+async def test_docker_stage_requests_do_not_depend_on_systemd_manager(health):
     config, backend = Config.parse(CONFIG), Fake()
     backend.lost.set()  # systemd unavailable; this must not affect Docker.
 
-    async def operate(work, action, lease=None):
+    async def operate(work, action, lease=None, cancel=None):
         assert lease is None
         backend.calls.append(("parent", action))
 
-    async def readiness(work):
-        return ready(
-            {"State": {"Running": True, **({"Health": {"Status": health}} if health else {})}}
-        )
-
-    backend.operate, backend.readiness = operate, readiness
+    backend.operate = operate
     engine = Engine(config, backend)
     report = await engine.inspect("robot", "start")
-    assert not report["requested_units"] and any(
-        "Docker lifecycle" in s for s in report["incomplete"]
-    )
-    backend.revision += 1
-    assert not engine.snapshot()["inspections"]["robot"]["stale"]
+    assert not report["requested_units"] and report["complete"]
     engine.launch("robot", True, "start")
-    assert (await asyncio.wait_for(engine.wait(), 2))["status"] == (
-        "failed" if health == "unhealthy" else "completed"
-    )
-    assert backend.calls == [("parent", "start")]  # No rollback, even after timeout.
+    assert (await asyncio.wait_for(engine.wait(), 2))["status"] == "completed"
+    assert backend.calls == [("parent", "start")]
     backend.calls.clear()
     engine.launch("robot", False, "start")
     assert (await engine.wait())["status"] == "completed"
@@ -78,7 +64,7 @@ async def test_child_operation_uses_global_busy_and_cancel_drains_issued_operati
     backend = Fake()
     release = asyncio.Event()
 
-    async def operate_child(work, child, epoch, action):
+    async def operate_child(work, child, epoch, action, cancel=None):
         backend.calls.append((child, action))
         await release.wait()
 

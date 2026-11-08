@@ -1,0 +1,14 @@
+# The service definitions are installed separately using the robot's deployment.
+workloads:
+  sensors: {backend: systemd, scope: system, unit: robot-sensors.service}
+  perception: {backend: systemd, scope: system, unit: robot-perception.service}
+  planning: {backend: systemd, scope: system, unit: robot-planning.service}
+groups:
+  robot:
+    steps:
+      - workload: sensors
+      - gate: sensors_ready
+      - workload: perception
+      - workload: planning
+gates:
+  sensors_ready: {type: manual}

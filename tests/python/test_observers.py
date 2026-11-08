@@ -11,7 +11,7 @@ from devdash.backend import Backends
 from devdash.engine import Engine
 from devdash.inspection import Graph
 from devdash.model import Config, ConfigError, observation
-from devdash.presentation import group_progress, workload_summary
+from devdash.presentation import stage_progress, workload_summary
 
 
 def observed_config():
@@ -26,20 +26,8 @@ def observed_config():
                     "controller": {"kind": "supervisord", "socket": "/run/supervisor.sock"},
                 }
             },
-            "groups": {
-                "robot": {
-                    "steps": [{"workload": "robot"}, {"gate": "health"}, {"gate": "continue"}]
-                }
-            },
-            "gates": {
-                "health": {
-                    "type": "container_ready",
-                    "workload": "robot",
-                    "timeout_ms": 100,
-                    "interval_ms": 5,
-                },
-                "continue": {"type": "manual"},
-            },
+            "stages": [{"id": "robot", "workloads": ["robot"]}],
+            "dependencies": {},
         }
     )
 
@@ -98,7 +86,11 @@ async def observed(monkeypatch):
         return_value=observation(state="active", pid=55, memory_bytes=88)
     )
     backend.systemd.operate = AsyncMock()
-    backend.systemd.dependencies = AsyncMock(return_value=Graph())
+    from devdash.model import UnitKey
+
+    backend.systemd.dependencies = AsyncMock(
+        return_value=Graph(inspected={UnitKey("system", "robot-container.service")})
+    )
     backend.systemd.lease = lambda scope: asyncio.Event()
     try:
         yield config, backend, work, info, failure, requests
@@ -113,7 +105,7 @@ async def test_systemd_lifecycle_docker_health_and_children_have_one_operation_p
     config, backend, work, info, failure, requests = observed
     lease = asyncio.Event()
     await backend.operate(work, action, lease)
-    backend.systemd.operate.assert_awaited_once_with(work, action, lease)
+    backend.systemd.operate.assert_awaited_once_with(work, action, lease, None)
     result = await backend.observe(work)
     assert result["state"] == "active" and result["pid"] == 55 and result["memory_bytes"] == 88
     assert result["health"] == "unhealthy" and result["readiness"]["state"] == "not_ready"
@@ -121,9 +113,9 @@ async def test_systemd_lifecycle_docker_health_and_children_have_one_operation_p
     assert result["internal"]["memory_bytes"] == 321
     assert result["children"][0]["id"] == "robot:worker"
     assert result["children"][1]["actions"] == []
-    assert not await backend.readiness(work)
+    assert (await backend.observe(work))["readiness"]["state"] == "not_ready"
     info["State"]["Health"]["Status"] = "healthy"
-    assert await backend.readiness(work)
+    assert (await backend.observe(work))["readiness"]["state"] == "ready"
     assert all(method == "GET" for method, _ in requests)
 
 
@@ -173,7 +165,7 @@ async def test_observer_disconnect_recovery_and_core_restart_do_not_infer_or_rep
     assert engine.observations["robot"]["readiness"]["state"] == "ready"
     restarted = Engine(config, backend)
     assert not restarted.observations
-    assert restarted.run["status"] == "" and restarted.run["plan"] == []
+    assert restarted.run["status"] == "" and restarted.run["progress"] == []
     await restarted.poll()
     assert not restarted.events and restarted.run["status"] == ""
     backend.systemd.operate.assert_not_awaited()
@@ -232,38 +224,19 @@ def test_same_container_cannot_have_both_systemd_and_direct_docker_lifecycle(dir
         Config(raw)
 
 
-async def test_readiness_and_approval_are_independent_and_restart_preserves_approval(observed):
-    from conftest import until
-
+async def test_observer_health_does_not_block_core_start(observed):
     config, backend, work, info, failure, requests = observed
     engine = Engine(config, backend)
-    info["State"]["Health"]["Status"] = "healthy"
+    assert info["State"]["Health"]["Status"] == "unhealthy"
     engine.launch("robot", True, "start")
-    await until(lambda: engine.run["waiting_gate"] == "continue")
-    text = group_progress(engine.snapshot(), "robot")
-    assert "[completed] start · workload" in text
-    assert "WAITING FOR CONTINUE" in text
-    engine.approve("continue")
     assert (await engine.wait())["status"] == "completed"
     engine.launch("robot", True, "restart")
     assert (await engine.wait())["status"] == "completed"
-    assert "continue" in engine.approved
     assert [call.args[1] for call in backend.systemd.operate.await_args_list] == [
         "start",
-        "stop",
-        "start",
+        "restart",
     ]
-    engine.launch("robot", True, "reinitialize")
-    await until(lambda: engine.run["waiting_gate"] == "continue")
-    assert "continue" not in engine.approved
-    engine.request_cancel()
-    assert (await engine.wait())["status"] == "cancelled"
-    # Individual operation bypasses the unapproved Gate and unhealthy Docker.
-    info["State"]["Health"]["Status"] = "unhealthy"
-    engine.launch("robot", False, "restart")
-    assert (await engine.wait())["status"] == "completed"
-    assert "not executed" in group_progress(engine.snapshot(), "robot")
-    assert all(method == "GET" for method, _ in requests)
+    assert not hasattr(engine, "approved")
 
 
 async def test_presentation_reports_facts_roles_and_staleness(observed):
@@ -314,13 +287,13 @@ async def test_systemd_notify_readiness_is_not_inferred_for_simple_services(
     assert result["state"] == state and result["readiness"]["state"] == expected
 
 
-async def test_systemd_gate_inspection_is_preserved_with_docker_observer(observed):
+async def test_later_stage_pull_in_is_detected_with_docker_observer(observed):
     from devdash.model import UnitKey
 
     config, backend, _, _, _, _ = observed
     raw = config.json()
-    raw["workloads"]["after"] = {"backend": "systemd", "scope": "system", "unit": "after.service"}
-    raw["groups"]["robot"]["steps"].append({"workload": "after"})
+    raw["workloads"]["after"] = dict(backend="systemd", scope="system", unit="after.service")
+    raw["stages"].append(dict(id="after", workloads=["after"]))
     config = Config(raw)
     source, target = (
         UnitKey("system", "robot-container.service"),
@@ -330,67 +303,150 @@ async def test_systemd_gate_inspection_is_preserved_with_docker_observer(observe
         edges={(source, "Requires", target)}, inspected={source, target}
     )
     engine = Engine(config, backend)
-    report = await engine.inspect("robot", "start")
-    assert any(d["code"] == "gate_bypass" for d in report["diagnostics"])
     engine.launch("robot", True, "start")
     assert (await engine.wait())["status"] == "failed"
     backend.systemd.operate.assert_not_awaited()
 
 
-def test_group_preview_never_confuses_active_services_with_completed_steps(config):
+def test_stage_preview_never_confuses_active_services_with_completed_operations(config):
     from conftest import Fake
 
     engine = Engine(config, Fake())
     engine.observations = {key: observation(state="active") for key in config.workloads}
-    text = group_progress(engine.snapshot(), "robot")
-    assert "not executed" in text and "completed" not in text
-    assert "Approval: ready" in text
+    assert "not requested" in stage_progress(engine.snapshot(), "sensors")
 
 
-async def test_progress_distinguishes_workload_and_gate_with_same_logical_id():
-    from conftest import Fake, until
+async def test_stage_and_workload_can_share_id_without_progress_confusion():
+    from conftest import Fake
 
     config = Config(
-        {
-            "workloads": {"same": {"backend": "systemd", "unit": "ordinary.service"}},
-            "groups": {"group": {"steps": [{"workload": "same"}, {"gate": "same"}]}},
-            "gates": {"same": {"type": "manual"}},
-        }
+        dict(
+            workloads={"same": dict(backend="systemd", unit="same.service")},
+            stages=[dict(id="same", workloads=["same"])],
+        )
     )
     engine = Engine(config, Fake())
-    engine.launch("group", True, "start")
-    try:
-        await until(lambda: engine.run["waiting_gate"] == "same")
-        text = group_progress(engine.snapshot(), "group")
-        assert "[completed] start · workload · same" in text
-        assert "[WAITING FOR CONTINUE] start · gate · Approval: same" in text
-    finally:
-        engine.request_cancel()
-        await engine.wait()
+    engine.launch("same", False, "start")
+    await engine.wait()
+    assert "not requested" in stage_progress(engine.snapshot(), "same")
 
 
-async def test_rejected_preflight_shows_steps_not_executed(config):
+async def test_blocked_stage_reports_unissued_workloads(config):
     from conftest import Fake
 
     backend = Fake()
     backend.graph.stale = True
     engine = Engine(config, backend)
-    engine.launch("robot", True, "start")
+    engine.launch("sensors", True, "start")
     assert (await engine.wait())["status"] == "failed"
-    text = group_progress(engine.snapshot(), "robot")
-    assert "not executed" in text and "pending" not in text and "NEXT" not in text
+    assert "[skipped]" in stage_progress(engine.snapshot(), "sensors")
     assert not backend.calls
 
 
-async def test_partial_restart_is_not_presented_as_whole_parent_group_result(config):
+async def test_other_stage_progress_is_not_claimed_after_partial_restart(config):
     from conftest import Fake
 
     engine = Engine(config, Fake())
     engine.launch("perception", True, "restart")
-    assert (await engine.wait())["status"] == "completed"
-    parent = group_progress(engine.snapshot(), "robot")
-    assert "parallel: camera, imu" in parent and "Approval: ready" in parent and "planner" in parent
-    assert "[completed]" not in parent and "not executed" in parent
-    assert "Current/last operation: perception restart" in parent
-    child = group_progress(engine.snapshot(), "perception")
-    assert "[completed] stop" in child and "[completed] start" in child
+    await engine.wait()
+    assert "not requested" in stage_progress(engine.snapshot(), "sensors")
+    assert "[completed]" in stage_progress(engine.snapshot(), "perception")
+
+
+async def test_http_is_observation_only_including_error_and_disconnect(monkeypatch):
+    from aiohttp import web
+
+    state = {"status": 204}
+
+    async def endpoint(request):
+        return web.Response(status=state["status"])
+
+    app = web.Application()
+    app.router.add_get("/health", endpoint)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    config = Config(
+        dict(
+            workloads={
+                "api": dict(
+                    backend="systemd",
+                    unit="api.service",
+                    observer={
+                        "http": dict(url=f"http://127.0.0.1:{port}/health", expected_status=204)
+                    },
+                )
+            },
+            stages=[dict(id="api", workloads=["api"])],
+        )
+    )
+    backend = Backends(config)
+    backend.systemd.observe = AsyncMock(return_value=observation(state="active"))
+    backend.systemd.operate = AsyncMock()
+    try:
+        assert (await backend.observe(config.workloads["api"]))["http"]["state"] == "ready"
+        state["status"] = 503
+        value = await backend.observe(config.workloads["api"])
+        assert value["state"] == "active" and value["http"]["state"] == "not_ready"
+        await runner.cleanup()
+        value = await backend.observe(config.workloads["api"])
+        assert value["state"] == "active" and value["http"]["state"] == "unknown"
+        backend.systemd.operate.assert_not_awaited()
+    finally:
+        await runner.cleanup()
+        await backend.close()
+
+
+async def test_cancel_during_docker_resolution_does_not_issue_lifecycle():
+    config = Config(
+        dict(workloads={"docker": dict(backend="docker", docker={"container": "robot"})})
+    )
+    backend = Backends(config)
+    entered, release = asyncio.Event(), asyncio.Event()
+    api = type("API", (), {"operate": AsyncMock()})()
+
+    async def resolve(work):
+        entered.set()
+        await release.wait()
+        return api, {"Id": "container"}
+
+    backend.resolved = resolve
+    engine = Engine(config, backend)
+    try:
+        engine.launch("docker", False, "start")
+        await entered.wait()
+        engine.request_cancel()
+        release.set()
+        run = await engine.wait()
+        assert run["status"] == "cancelled" and run["progress"][0]["status"] == "skipped"
+        api.operate.assert_not_awaited()
+    finally:
+        await backend.close()
+
+
+async def test_cancel_during_controller_snapshot_does_not_issue_child_mutation(
+    observed, monkeypatch
+):
+    config, backend, work, _, _, _ = observed
+    child = next(c for c in (await backend.observe(work))["children"] if c["kind"] == "service")
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = DockerAPI.rpc
+    requests = []
+
+    async def delayed(self, info, controller, request):
+        requests.append(request["command"])
+        entered.set()
+        await release.wait()
+        return await original(self, info, controller, request)
+
+    monkeypatch.setattr(DockerAPI, "rpc", delayed)
+    engine = Engine(config, backend)
+    engine.launch_child("robot", child["id"], child["epoch"], "restart")
+    await entered.wait()
+    engine.request_cancel()
+    release.set()
+    run = await engine.wait()
+    assert run["status"] == "cancelled" and run["progress"][0]["status"] == "skipped"
+    assert requests == ["snapshot"]

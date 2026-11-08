@@ -4,7 +4,7 @@ After=dbus.socket
 
 [Service]
 Type=simple
-ExecStart="%h/.local/share/devdash/current/bin/python" -I -m devdash --socket "%t/devdash-python/core.sock" daemon --config "%h/.config/devdash/config.yaml" --state "%h/.local/state/devdash-python/approvals.json"
+ExecStart="%h/.local/share/devdash/current/bin/python" -I -m devdash --socket "%t/devdash-python/core.sock" daemon --config "%h/.config/devdash/config.yaml"
 WorkingDirectory=%h
 Environment=PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus

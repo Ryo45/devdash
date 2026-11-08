@@ -34,7 +34,7 @@ def test_core_and_gui_version_comes_from_package_metadata():
     assert __version__ == version("devdash-python")
 
 
-@pytest.mark.parametrize("protocol", [None, 0, 2, True, "1"])
+@pytest.mark.parametrize("protocol", [None, 0, 1, True, "2"])
 async def test_incompatible_raw_client_never_dispatches_operation(core_endpoint, backend, protocol):
     engine, server, socket = core_endpoint
     reader, writer = await asyncio.open_unix_connection(str(socket))
@@ -44,7 +44,7 @@ async def test_incompatible_raw_client_never_dispatches_operation(core_endpoint,
                 dict(
                     command="operate",
                     target="camera",
-                    group=False,
+                    kind="workload",
                     action="start",
                     protocol=protocol,
                     core_instance=engine.core["instance"],
@@ -62,17 +62,17 @@ async def test_incompatible_raw_client_never_dispatches_operation(core_endpoint,
         await writer.wait_closed()
 
 
-@pytest.mark.parametrize("command", ["operate", "approve", "cancel", "child", "import"])
+@pytest.mark.parametrize("command", ["operate", "next", "cancel", "child", "reload"])
 async def test_stale_gui_core_instance_is_rejected_before_any_mutation(
     core_endpoint, backend, command
 ):
     engine, server, socket = core_endpoint
     with pytest.raises(CompatibilityError, match="Core instance changed"):
         await request(socket, {"command": command, "core_instance": "old-core"})
-    assert not engine.busy and not backend.calls and not engine.approved
+    assert not engine.busy and not backend.calls
 
 
-@pytest.mark.parametrize("protocol", [None, 2])
+@pytest.mark.parametrize("protocol", [None, 1])
 async def test_legacy_or_incompatible_core_only_receives_readonly_handshake(tmp_path, protocol):
     socket = tmp_path / "legacy.sock"
     received = []
@@ -102,7 +102,7 @@ async def test_legacy_or_incompatible_core_only_receives_readonly_handshake(tmp_
                 dict(
                     command="operate",
                     target="camera",
-                    group=False,
+                    kind="workload",
                     action="start",
                     core_instance="cached-id",
                 ),
@@ -134,7 +134,9 @@ async def test_handshake_and_operation_are_bound_to_same_connection(core_endpoin
 
     server.dispatch = dispatch
     try:
-        await request(socket, dict(command="operate", target="camera", group=False, action="start"))
+        await request(
+            socket, dict(command="operate", target="camera", kind="workload", action="start")
+        )
         assert (await engine.wait())["status"] == "completed"
         assert engine.backend.calls == [("camera", "start")]
         assert not replacement_backend.calls
@@ -161,7 +163,7 @@ async def test_connection_lost_after_dispatch_is_unknown_and_not_retried(core_en
 
     server.dispatch = dispatch
     client = asyncio.create_task(
-        request(socket, dict(command="operate", target="camera", group=False, action="start"))
+        request(socket, dict(command="operate", target="camera", kind="workload", action="start"))
     )
     try:
         await asyncio.wait_for(dispatched.wait(), 2)

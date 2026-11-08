@@ -10,13 +10,11 @@ import signal
 from contextlib import suppress
 from pathlib import Path
 
-import yaml
-
 from .backend import Backends
 from .engine import Engine
-from .model import Config
+from .inspection import inspect
+from .model import Config, systemd_key
 from .protocol import CORE_PROTOCOL, MUTATIONS, CompatibilityError, check_core, check_request
-from .self_protection import reject_application_unit
 
 LIMIT = 4 * 1024 * 1024
 
@@ -25,13 +23,6 @@ def default_socket():
     return (
         Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/devdash-{os.getuid()}"))
         / "devdash-python/core.sock"
-    )
-
-
-def default_state():
-    return (
-        Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
-        / "devdash-python/approvals.json"
     )
 
 
@@ -86,6 +77,10 @@ async def request(path, command):
                     "Core instance changed; refresh observations before operating. Request rejected."
                 )
             value["core_instance"] = instance
+            revision = snapshot["config_revision"]
+            if value.get("config_revision", revision) != revision:
+                raise CompatibilityError("Configuration changed; refresh before operating")
+            value["config_revision"] = revision
         return await exchange(value)
     except (OSError, asyncio.TimeoutError, ValueError) as error:
         if mutation_sent:
@@ -109,14 +104,18 @@ class Server:
         engine = self.engine
         check_request(value, engine.core)
         command = value.get("command")
+        if command in MUTATIONS and value.get("config_revision") != engine.config_revision:
+            raise CompatibilityError("Configuration changed; refresh before operating")
         if command == "snapshot":
             return engine.snapshot()
         if command == "operate":
-            engine.launch(value["target"], value.get("group", True), value["action"])
+            if value.get("kind") not in ("stage", "workload"):
+                raise ValueError("Operation needs kind=stage or workload")
+            engine.launch(value["target"], value["kind"] == "stage", value["action"])
+        elif command == "next":
+            engine.launch_next(value["after"])
         elif command == "child":
             engine.launch_child(value["parent"], value["child"], value["epoch"], value["action"])
-        elif command == "approve":
-            engine.approve(value["gate"])
         elif command == "cancel":
             engine.request_cancel()
         elif command == "inspect":
@@ -125,43 +124,57 @@ class Server:
             return await engine.backend.scan(value.get("scope", "user"))
         elif command == "logs":
             return await engine.backend.logs(engine.config.workloads[value["target"]])
-        elif command == "import":
-            return await self.import_units(value)
+        elif command == "inspect_config":
+            candidate = Config(value["config"])
+            seeds = {
+                key
+                for work in candidate.workloads.values()
+                if (key := systemd_key(work)) is not None
+            }
+            graph = await engine.backend.dependencies(seeds)
+            return [
+                inspect(candidate, stage["id"], "restart", graph, check_declared=False)
+                for stage in candidate.stages
+            ]
+        elif command == "resolve":
+            await engine.backend.validate_registration(
+                dict(backend="systemd", scope=value["scope"], unit=value["unit"])
+            )
+            return {"valid": True}
+        elif command == "reload":
+            return await self.reload_config()
         else:
             raise ValueError(f"Unknown command: {command}")
         return engine.snapshot()
 
-    async def import_units(self, value):
-        engine = self.engine
-        if engine.busy:
-            raise ValueError("Import is unavailable during an operation")
-        for unit in value["units"]:
-            reject_application_unit(unit)
-        available = set(await engine.backend.scan(value["scope"]))
-        unknown = set(value["units"]) - available
-        if unknown:
-            raise ValueError("Scan: units not available: " + ", ".join(sorted(unknown)))
-        for unit in value["units"]:
-            await engine.backend.validate_registration(
-                {"backend": "systemd", "scope": value["scope"], "unit": unit}
-            )
-        # Read-only resolution yielded to clients; recheck before changing config.
-        if engine.busy:
-            raise ValueError("Import is unavailable during an operation")
-        if Config.load(self.config_path).json() != engine.config.json():
-            raise ValueError("Configuration changed on disk; restart Core before importing")
-        config = Config(engine.config.json())
-        ids = [config.import_unit(unit, value["scope"]) for unit in value["units"]]
-        self.config_path.with_suffix(self.config_path.suffix + ".bak").write_text(
-            self.config_path.read_text()
+    async def reload_config(self):
+        if self.engine.busy:
+            raise ValueError("Reload unavailable during an operation")
+        candidate = Config.load(self.config_path)
+        for work in candidate.workloads.values():
+            try:
+                await self.engine.backend.validate_registration(work)
+            except ValueError:
+                raise
+            except Exception:
+                pass  # Missing/offline units remain registered, with unknown/not_found observations.
+        if self.engine.busy or Config.load(self.config_path).json() != candidate.json():
+            raise ValueError("Configuration or operation changed during reload; retry")
+        self.engine.config = candidate
+        self.engine.config_revision += 1
+        self.engine.backend.systemd.config = candidate
+        self.engine.observations.clear()
+        self.engine.known.clear()
+        self.engine.outages.clear()
+        self.engine.reports.clear()
+        self.engine.run.update(target="", kind="", action="", status="", progress=[], error=None)
+        self.engine.invalidate()
+        self.engine.emit(
+            "info",
+            "Configuration reloaded; fresh observation baseline; no lifecycle operations issued",
+            kind="configuration",
         )
-        temporary = self.config_path.with_suffix(self.config_path.suffix + ".tmp")
-        temporary.write_text(yaml.safe_dump(config.json(), sort_keys=False, allow_unicode=True))
-        temporary.replace(self.config_path)
-        engine.config = config
-        engine.backend.systemd.config = config
-        engine.invalidate()
-        return ids
+        return self.engine.snapshot()
 
     async def handle(self, reader, writer):
         task = asyncio.current_task()
@@ -202,9 +215,9 @@ class Server:
                 await writer.wait_closed()
 
 
-async def serve(config_path, socket_path, state_path, backend=None):
+async def serve(config_path, socket_path, backend=None):
     config = Config.load(Path(config_path))
-    socket_path, state_path = Path(socket_path), Path(state_path)
+    socket_path = Path(socket_path)
     socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if socket_path.parent.stat().st_uid != os.getuid() or socket_path.parent.stat().st_mode & 0o077:
         raise ValueError("Socket parent must belong to current user and have mode 0700")
@@ -214,9 +227,7 @@ async def serve(config_path, socket_path, state_path, backend=None):
         except BlockingIOError:
             raise RuntimeError("Another Core owns this socket") from None
         backend = backend or Backends(config)
-        engine = Engine(
-            config, backend, state_path, Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        )
+        engine = Engine(config, backend)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):

@@ -1,5 +1,7 @@
 # 自己管理の防止とコード整理（0.2.1）
 
+> 比較元Coordinator方式（main `d143e97`）の記録です。Stage版の現行仕様とテストは[比較レポート](stage-comparison.md)を参照してください。
+
 Core/GUI自身のsystemd unitを、devdashのWorkloadとして登録・直接操作しないようにしました。
 Core自身の起動・停止・再起動は、アプリの外から`systemctl --user`等で行います。
 Bridgeはロボット側のWorkloadなので禁止対象に含めません。

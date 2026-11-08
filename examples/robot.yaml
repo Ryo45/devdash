@@ -1,24 +1,48 @@
 workloads:
-  camera: {backend: systemd, unit: devdash-demo-camera.service}
-  imu: {backend: systemd, unit: devdash-demo-imu.service}
-  detector: {backend: systemd, unit: devdash-demo-detector.service}
-  planner: {backend: systemd, unit: devdash-demo-planner.service}
-groups:
-  robot:
-    name: Robot
-    steps:
-      - group: sensors
-      - gate: sensors_ready
-      - group: perception
-      - group: planning
-  sensors:
-    steps:
-      - parallel: [camera, imu]
-  perception:
-    steps:
-      - workload: detector
-  planning:
-    steps:
-      - workload: planner
-gates:
-  sensors_ready: {type: manual}
+  camera:
+    backend: systemd
+    unit: devdash-demo-camera.service
+    name: ''
+    scope: user
+  imu:
+    backend: systemd
+    unit: devdash-demo-imu.service
+    name: ''
+    scope: user
+  detector:
+    backend: systemd
+    unit: devdash-demo-detector.service
+    name: ''
+    scope: user
+  planner:
+    backend: systemd
+    unit: devdash-demo-planner.service
+    name: ''
+    scope: user
+stages:
+- id: sensors
+  name: Sensors
+  description: Check camera images and IMU data
+  checks:
+  - Verify images and IMU before explicitly starting Perception
+  workloads:
+  - camera
+  - imu
+- id: perception
+  name: Perception
+  workloads:
+  - detector
+  description: ''
+  checks: []
+- id: control
+  name: Control
+  workloads:
+  - planner
+  description: ''
+  checks: []
+dependencies:
+  detector:
+  - camera
+  - imu
+  planner:
+  - detector

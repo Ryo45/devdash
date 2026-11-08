@@ -3,7 +3,6 @@ import os
 import uuid
 
 import pytest
-from conftest import until
 
 from devdash.adapters.docker import demultiplex, ready
 from devdash.backend import Backends
@@ -65,20 +64,8 @@ async def test_supervisor_services_health_epochs_and_container_recreation():
                     "controller": {"kind": "supervisord", "socket": "/tmp/devdash-supervisor.sock"},
                 }
             },
-            "groups": {
-                "robot": {
-                    "steps": [{"workload": "container"}, {"gate": "ready"}, {"gate": "operator"}]
-                }
-            },
-            "gates": {
-                "ready": {
-                    "type": "container_ready",
-                    "workload": "container",
-                    "timeout_ms": 20000,
-                    "interval_ms": 100,
-                },
-                "operator": {"type": "manual"},
-            },
+            "stages": [{"id": "robot", "workloads": ["container"]}],
+            "dependencies": {},
         }
     )
     backend = Backends(config)
@@ -104,23 +91,19 @@ async def test_supervisor_services_health_epochs_and_container_recreation():
 
     try:
         engine.launch("robot", True, "start")
-        await until(
-            lambda: engine.run["waiting_gate"] == "operator" or engine.run["status"] == "failed",
-            timeout=25,
-        )
-        assert engine.run["waiting_gate"] == "operator", engine.run
+        await complete()
         initial = await observe(
-            lambda value: any(
-                c["id"] == "worker:worker" and c["state"] == "RUNNING" for c in value["children"]
+            lambda value: (
+                value["health"] == "healthy"
+                and any(
+                    c["id"] == "worker:worker" and c["state"] == "RUNNING"
+                    for c in value["children"]
+                )
             )
         )
         assert initial["health"] == "healthy" and initial["canonical_unit"] == initial_id
         worker, idle = child(initial, "worker:worker"), child(initial, "idle:idle")
         assert idle["pid"] is None and "start" in idle["actions"]
-        with pytest.raises(ValueError, match="Another"):
-            engine.launch_child("container", idle["id"], idle["epoch"], "start")
-        engine.approve("operator")
-        await complete()
         raw = next(c for c in initial["children"] if c["kind"] == "process")
         assert raw["actions"] == []
         engine.launch_child("container", raw["id"], raw["epoch"], "stop")
@@ -196,20 +179,8 @@ async def test_systemd_managed_container_observation_and_child_control(monkeypat
                     "controller": {"kind": "supervisord", "socket": "/tmp/devdash-supervisor.sock"},
                 }
             },
-            "groups": {
-                "robot": {
-                    "steps": [{"workload": "robot"}, {"gate": "health"}, {"gate": "continue"}]
-                }
-            },
-            "gates": {
-                "health": {
-                    "type": "container_ready",
-                    "workload": "robot",
-                    "timeout_ms": 20000,
-                    "interval_ms": 100,
-                },
-                "continue": {"type": "manual"},
-            },
+            "stages": [{"id": "robot", "workloads": ["robot"]}],
+            "dependencies": {},
         }
     )
     backend = Backends(config)
@@ -247,15 +218,16 @@ async def test_systemd_managed_container_observation_and_child_control(monkeypat
         await backend.start()
         await backend.systemd.session("user").call("Reload")
         engine.launch("robot", True, "start")
-        await until(
-            lambda: engine.run["waiting_gate"] == "continue" or engine.run["status"] == "failed",
-            timeout=25,
-        )
-        assert engine.run["waiting_gate"] == "continue", engine.run
+        assert (await engine.wait())["status"] == "completed"
+
+        async def healthy():
+            while (await backend.observe(work))["health"] != "healthy":
+                await asyncio.sleep(0.1)
+
+        await asyncio.wait_for(healthy(), 20)
         value = await backend.observe(work)
         assert value["state"] == "active" and value["internal"]["state"] == "active"
         assert value["health"] == "healthy" and value["readiness"]["state"] == "ready"
-        engine.approve("continue")
         assert (await engine.wait())["status"] == "completed"
         worker = next(c for c in value["children"] if c["id"] == "worker:worker")
         await backend.operate_child(work, worker["id"], worker["epoch"], "stop")

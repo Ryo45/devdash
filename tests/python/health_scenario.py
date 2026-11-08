@@ -56,25 +56,19 @@ class HealthScenario:
                     },
                     "next": {"backend": "systemd", "unit": self.units["next"]},
                 },
-                "groups": {
-                    "robot": {
-                        "steps": [
-                            {"workload": "container"},
-                            {"gate": "operator"},
-                            {"workload": "next"},
-                        ]
-                    }
-                },
-                "gates": {"operator": {"type": "manual"}},
+                "stages": [
+                    {"id": "robot", "workloads": ["container"]},
+                    {"id": "next", "workloads": ["next"]},
+                ],
             }
         )
         self.backend = Backends(self.config)
         self.engine = Engine(self.config, self.backend)
         operate = self.backend.operate
 
-        async def recorded(work, action, lease=None):
+        async def recorded(work, action, lease=None, cancel=None):
             self.calls.append((work["unit"], action))
-            return await operate(work, action, lease)
+            return await operate(work, action, lease, cancel)
 
         self.backend.operate = recorded
 

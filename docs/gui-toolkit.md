@@ -1,5 +1,7 @@
 # GUIをttkbootstrap + Tkinterへ移行
 
+> 比較元Coordinator方式（main `d143e97`）の記録です。Stage版の現行仕様とテストは[比較レポート](stage-comparison.md)を参照してください。
+
 ライセンス構成を変更するため、PySide6 / Qt Widgetsをttkbootstrap 2.2.7 + Tkinterへ置き換えました。
 Core、systemd/Docker Adapter、Steps実行、IPCのプロトコルやGate永続化は変更していません。
 Qt版はコミット`3fa3218`および`experiment/python-only`で参照できます。Rust版は`archive/rust-gpui`です。

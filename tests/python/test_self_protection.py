@@ -1,13 +1,10 @@
 """Application lifecycle is outside Workload management."""
 
-import asyncio
-
 import pytest
-import yaml
 from private_bus import Harness
 
 from devdash.backend import Backends
-from devdash.ipc import Server, request
+from devdash.ipc import Server
 from devdash.model import Config, ConfigError
 from devdash.self_protection import SelfManagementError, application_command
 
@@ -159,31 +156,20 @@ async def test_scan_filters_own_unit_aliases_and_reserved_names(own_units):
     assert "devdash-gui.service" not in units
 
 
-async def test_import_refusal_leaves_config_and_backup_untouched(own_units, tmp_path):
+async def test_readonly_resolution_refuses_self_without_editing_runtime(own_units, tmp_path):
     h = own_units
-    manager = h.managers["user"]
-    manager.exec_start["ordinary-new.service"] = []
-    manager.exec_start["custom-gui.service"] = [exec_row("/venv/bin/devdash-gui", ["devdash-gui"])]
-    path, socket = tmp_path / "config.yaml", tmp_path / "core.sock"
-    path.write_text(yaml.safe_dump(h.engine.config.json()))
-    original = path.read_text()
-    server = Server(h.engine, path)
-    listener = await asyncio.start_unix_server(server.handle, path=str(socket))
-    try:
-        for unit in ("devdash-core.service", "custom-core.service", "custom-gui.service"):
-            with pytest.raises(RuntimeError, match="cannot manage itself|not available"):
-                await request(
-                    socket,
-                    {"command": "import", "scope": "user", "units": ["ordinary-new.service", unit]},
-                )
-            assert path.read_text() == original
-            assert not path.with_suffix(".yaml.bak").exists()
-            assert unit not in [work["unit"] for work in h.engine.config.workloads.values()]
-        assert not manager.calls
-    finally:
-        listener.close()
-        await listener.wait_closed()
-        await asyncio.gather(*server.clients, return_exceptions=True)
+    config = h.engine.config
+    before = config.json()
+    server = Server(h.engine, tmp_path / "not-written.yaml")
+    from devdash.protocol import CORE_PROTOCOL
+
+    with pytest.raises(ValueError, match="cannot manage"):
+        await server.dispatch(
+            dict(
+                command="resolve", scope="user", unit="custom-core.service", protocol=CORE_PROTOCOL
+            )
+        )
+    assert config.json() == before and not list(tmp_path.glob("*.yaml*"))
 
 
 async def test_regular_service_and_ros_bridge_remain_operable(own_units):

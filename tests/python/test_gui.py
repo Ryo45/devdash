@@ -1,77 +1,37 @@
-"""Real Tkinter controls through IPC to an independent Core thread, with Fake Backend."""
+"""Actual Stage/Next controls and offline Editor/Generator using the same models."""
 
-import asyncio
+import json
 import os
-import threading
 import time
 
 import pytest
+from test_gui_lifecycle import CorePeer
 
 pytestmark = [
     pytest.mark.gui,
-    pytest.mark.skipif(
-        os.environ.get("DEVDASH_GUI_TEST") != "1",
-        reason="set DEVDASH_GUI_TEST=1 and run with a display or xvfb-run",
-    ),
+    pytest.mark.skipif(os.environ.get("DEVDASH_GUI_TEST") != "1", reason="requires Tk display"),
 ]
 
 
-def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
-    import json
-
-    from conftest import Fake
-
-    from devdash.engine import Engine
+def test_gui_stage_next_partial_restart_and_editor_generation(config, tmp_path):
+    from devdash.generator import read_current
     from devdash.gui import Window
-    from devdash.ipc import Server
+    from devdash.model import Config
 
-    socket = tmp_path / "core.sock"
-    state = {}
-    ready = threading.Event()
+    peer = CorePeer(config, tmp_path / "core.sock")
+    window = Window(peer.socket)
+    errors = []
+    window.report_callback_exception = lambda *args: errors.append(args)
 
-    async def core():
-        backend = Fake()
-        engine = Engine(config, backend)
-        import yaml
-
-        path = tmp_path / "config.yaml"
-        path.write_text(yaml.safe_dump(config.json()))
-        backend.systemd = backend  # Import updates the adapter's config reference.
-        backend.config = config
-        server = Server(engine, path)
-        listener = await asyncio.start_unix_server(server.handle, path=str(socket))
-        state.update(
-            loop=asyncio.get_running_loop(), engine=engine, backend=backend, stop=asyncio.Event()
-        )
-        monitor = asyncio.create_task(engine.monitor())
-        ready.set()
-        try:
-            await state["stop"].wait()
-        finally:
-            listener.close()
-            await listener.wait_closed()
-            monitor.cancel()
-            await asyncio.gather(monitor, return_exceptions=True)
-
-    thread = threading.Thread(target=lambda: asyncio.run(core()), daemon=True)
-    thread.start()
-    assert ready.wait(5)
-    window = Window(socket)
-    callback_errors = []
-    window.report_callback_exception = lambda *args: callback_errors.append(args)
-
-    def wait(predicate, timeout=5):
-        deadline = time.monotonic() + timeout
+    def wait(predicate):
+        deadline = time.monotonic() + 6
         while not predicate():
             assert time.monotonic() < deadline, window.error.cget("text")
             window.update()
             time.sleep(0.01)
 
-    def select(identity):
-        iid = json.dumps(identity, ensure_ascii=False)
-        assert window.tree.exists(iid), identity
-        window.tree.selection_set(iid)
-        window.tree.focus(iid)
+    def select(kind, key):
+        window.tree.selection_set(json.dumps([kind, key]))
         window.tree.event_generate("<<TreeviewSelect>>")
         window.update()
 
@@ -80,82 +40,97 @@ def test_gui_group_approve_partial_restart_cancel_and_logs(config, tmp_path):
         button.invoke()
         window.update()
 
+    editor = None
     try:
-        wait(lambda: window.snapshot is not None)
-        select(["group", "robot"])
+        wait(lambda: window.connected)
+        select("stage", "sensors")
+        assert "detector" in window.next_button.cget("text")
         click(window.buttons["start"])
-        wait(lambda: window.snapshot["run"]["waiting_gate"] == "ready")
-        assert len(state["backend"].calls) == 2
-        assert "Continue" in window.approve.cget("text")
-        timeline = window.texts["Progress"].get("1.0", "end-1c")
-        assert "WAITING FOR CONTINUE" in timeline and "[NEXT]" in timeline
-        assert "[completed] start · parallel" in timeline
-        assert window.buttons["restart"].instate(["disabled"])
-        click(window.approve)
         wait(lambda: window.snapshot["run"]["status"] == "completed")
-        assert state["backend"].calls[-2:] == [("detector", "start"), ("planner", "start")]
-        select(["group", "perception"])
-        before = len(state["backend"].calls)
+        assert set(peer.backend.calls) == {("camera", "start"), ("imu", "start")}
+        assert "[completed]" in window.texts["Progress"].get("1.0", "end-1c")
+        click(window.next_button)
+        wait(
+            lambda: (
+                window.snapshot["run"]["target"] == "perception"
+                and window.snapshot["run"]["status"] == "completed"
+            )
+        )
+        assert peer.backend.calls[-1] == ("detector", "start")
+        assert ("planner", "start") not in peer.backend.calls
+        assert window.selection == ["stage", "perception"]
+        assert "planner" in window.next_button.cget("text")
+        click(window.next_button)
+        wait(
+            lambda: (
+                window.snapshot["run"]["target"] == "control"
+                and window.snapshot["run"]["status"] == "completed"
+            )
+        )
+        assert peer.backend.calls[-1] == ("planner", "start")
+        select("stage", "perception")
         click(window.buttons["restart"])
         wait(
             lambda: (
-                len(state["backend"].calls) == before + 2
-                and window.snapshot["run"]["target"] == "perception"
+                peer.backend.calls[-1] == ("detector", "restart")
+                and window.snapshot["run"]["action"] == "restart"
                 and window.snapshot["run"]["status"] == "completed"
             )
         )
-        assert state["backend"].calls[-2:] == [("detector", "stop"), ("detector", "start")]
-        select(["group", "robot"])
-        click(window.buttons["reinitialize"])
-        wait(lambda: window.snapshot["run"]["waiting_gate"] == "ready")
-        click(window.cancel)
-        wait(lambda: window.snapshot["run"]["status"] == "cancelled")
-        assert any(step["status"] == "skipped" for step in window.snapshot["run"]["progress"])
-        select(["workload", "detector"])
-        assert "Start (systemd)" == window.buttons["start"].cget("text")
+        select("workload", "detector")
         assert "Lifecycle Controller: systemd" in window.summary.cget("text")
-        assert "Readiness: unknown" in window.summary.cget("text")
         window.logs()
         wait(lambda: "fixture log" in window.texts["Logs"].get("1.0", "end-1c"))
-        assert not window.buttons["start"].instate(["disabled"])
-        click(window.buttons["start"])
-        wait(
-            lambda: (
-                window.snapshot["run"]["target"] == "detector"
-                and window.snapshot["run"]["status"] == "completed"
-            )
-        )
-        assert state["backend"].calls[-1] == ("detector", "start")
-        assert "ready" not in window.snapshot["approved"]
-        # Actual Scan/Import controls, including scope-change selection reset.
-        dialog = window.scan_dialog()
-        click(dialog.scan_button)
-        wait(lambda: bool(dialog.units.get_children()))
-        dialog.units.selection_set("importable.service")
-        dialog.scope.set("system")
-        dialog.scope.event_generate("<<ComboboxSelected>>")
-        window.update()
-        assert not dialog.units.get_children()
-        click(dialog.scan_button)
-        wait(lambda: bool(dialog.units.get_children()))
-        dialog.units.selection_set("importable.service")
-        click(dialog.import_button)
-        wait(lambda: "Imported:" in dialog.message.cget("text"))
-        wait(lambda: "importable" in window.snapshot["config"]["workloads"])
-        assert window.snapshot["config"]["workloads"]["importable"]["scope"] == "system"
-        assert (tmp_path / "config.yaml.bak").exists()
-        dialog.close()
-        assert not callback_errors, callback_errors
-        if screenshot := os.environ.get("DEVDASH_GUI_SCREENSHOT"):
-            from PIL import ImageGrab
+        before = list(peer.backend.calls)
+        editor = window.open_editor()
 
-            window.update()
-            x, y = window.winfo_rootx(), window.winfo_rooty()
-            ImageGrab.grab(bbox=(x, y, x + window.winfo_width(), y + window.winfo_height())).save(
-                screenshot
+        def editor_click(text):
+            def widgets(parent):
+                for child in parent.winfo_children():
+                    yield child
+                    yield from widgets(child)
+
+            button = next(
+                widget
+                for widget in widgets(editor)
+                if widget.winfo_class() == "TButton" and widget.cget("text") == text
             )
+            button.invoke()
+            editor.update()
+
+        editor.source.set(str(tmp_path / "edit.yaml"))
+        editor.output.set(str(tmp_path / "generated"))
+        # Create two independent stages and workloads through actual form widgets.
+        for stage in ("first", "second"):
+            editor.new_stage()
+            editor.put(editor.stage_fields["id"], stage)
+            editor.put(editor.stage_fields["name"], stage.title())
+            editor_click("Apply Stage")
+        for key, stage in (("one", "first"), ("two", "second")):
+            editor.new_workload()
+            for field, value in dict(id=key, unit=key + ".service", stage=stage).items():
+                editor.put(editor.work_fields[field], value)
+            editor_click("Apply Workload")
+        editor.dependent.set("two")
+        editor.prerequisites.selection_set("one")
+        editor_click("Apply explicit dependencies")
+        assert editor.config.dependencies == {"two": ["one"]}
+        editor_click("Preview")
+        plan = editor.plan
+        assert any("Requisite=one.service" in item["diff"] for item in plan["changes"])
+        editor_click("Generate")
+        name, files = read_current(tmp_path / "generated")
+        assert Config.parse(files["devdash.yaml"]).stages[0]["id"] == "first"
+        assert (tmp_path / "edit.yaml").exists() and name
+        assert peer.backend.calls == before  # Editor save/generate issues no lifecycle requests.
+        # Invalid reordering fails without changing the model.
+        editor.stage_list.selection_set("second")
+        editor_click("Up")
+        assert editor.config.stages[0]["id"] == "first"
+        assert "earlier Stage" in editor.message.cget("text")
+        assert not errors, errors
     finally:
+        if editor:
+            editor.close()
         window.close()
-        state["loop"].call_soon_threadsafe(state["stop"].set)
-        thread.join(5)
-        assert not thread.is_alive()
+        peer.close()

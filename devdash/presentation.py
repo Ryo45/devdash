@@ -41,6 +41,8 @@ def workload_summary(work, observed, connected=True):
         lines.insert(1, f"Container execution: {internal['state']}")
         if internal.get("state") == "unknown":
             lines[3] = "Health: unknown (Docker observation unavailable)"
+    if observed.get("http"):
+        lines.append("HTTP observation: " + str(observed["http"]))
     if ready.get("detail"):
         lines.append(ready["detail"])
     for field in ("error", "observer_error", "children_error"):
@@ -52,52 +54,34 @@ def workload_summary(work, observed, connected=True):
     return "\n".join(lines)
 
 
-def group_progress(snapshot, group):
+def stage_progress(snapshot, key):
     config = Config(snapshot["config"])
-    selected = config.expand(group)
+    stage = config.stage(key)
     run = snapshot["run"]
-    labels = {(step.kind, step.label) for step in selected}
-    relevant = [row for row in run.get("plan", []) if (row["kind"], row["step"]) in labels]
-    # Child/direct operations are never presented as a completed Group sequence.
-    covered = {(row["kind"], row["step"]) for row in relevant}
-    if not run.get("group") or not labels <= covered:
-        relevant = []
-    plan = relevant or [dict(step=s.label, kind=s.kind, action="start") for s in selected]
-    progress = (
-        {(p["action"], p.get("kind"), p["step"]): p for p in run["progress"]} if relevant else {}
-    )
-    next_marked = False
-    lines = ["Group sequence · ordered Steps (Parallel members run together)"]
-    for number, row in enumerate(plan, 1):
-        entry = progress.get((row["action"], row["kind"], row["step"]), {})
-        status = entry.get(
-            "status",
-            "pending"
-            if relevant and run["status"] in ("running", "cancelling")
-            else "not executed",
-        )
-        label = row["step"]
-        if row["kind"] == "gate":
-            manual = config.gates[label]["type"] == "manual"
-            label = ("Approval: " if manual else "Readiness check: ") + label
-            if row["action"] == "stop":
-                label += " (skipped on Stop)"
-            elif status == "running" and run["waiting_gate"] == row["step"]:
-                status = "WAITING FOR CONTINUE" if manual else "WAITING FOR READINESS"
-        if status == "pending" and not next_marked and run["status"] == "running":
-            status = "NEXT"
-            next_marked = True
-        lines.append(f"{number:02d}  [{status}] {row['action']} · {row['kind']} · {label}")
-        if entry.get("error"):
-            lines.append("    " + entry["error"])
-    if not relevant:
-        if run["status"]:
-            lines.append(
-                f"Current/last operation: {run['target']} {run.get('action', '')} · {run['status']}"
-            )
+    relevant = run["kind"] == "stage" and run["target"] == key
+    progress = {p["workload"]: p for p in run["progress"]} if relevant else {}
+    lines = [
+        f"Stage: {stage['name']}",
+        stage["description"],
+        "Results refer only to the current/last request; previous Stage successes are not latched.",
+    ]
+    lines.extend("Check: " + item for item in stage["checks"])
+    for member in stage["workloads"]:
+        entry = progress.get(member, {})
         lines.append(
-            "No Group sequence result for this selection. Service state is shown separately."
+            f"[{entry.get('status', 'pending' if relevant and run['status'] == 'running' else 'not requested')}] {member}"
+            + (": " + entry["error"] if entry.get("error") else "")
         )
-    elif run.get("error"):
-        lines.append("Sequence error: " + run["error"])
+    if relevant:
+        lines.append(
+            "Operation: " + run["status"] + (": " + run["error"] if run.get("error") else "")
+        )
+    try:
+        following = config.next_stage(key)
+        lines.append(
+            f"Next Stage (explicit request only): {following['name']} · "
+            + ", ".join(following["workloads"])
+        )
+    except ValueError:
+        lines.append("Last Stage; no Next request available")
     return "\n".join(lines)

@@ -1,5 +1,7 @@
 # Lifecycle・Observer・Gateの分離
 
+> 比較元Coordinator方式（main `d143e97`）の記録です。このStageブランチの現行仕様・検証は[比較レポート](stage-comparison.md)と[設定手順](stage-configuration.md)を参照してください。旧操作の説明をStage版へ適用しないでください。
+
 mainの変更です。小さな変更ごとのリリースタグは追加せず、既存の設定とIPC major 1を維持します。
 
 ## 責務と設定

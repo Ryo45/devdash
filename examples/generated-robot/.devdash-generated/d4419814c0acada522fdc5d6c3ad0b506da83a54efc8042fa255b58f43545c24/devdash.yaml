@@ -1,0 +1,48 @@
+dependencies:
+  detector:
+  - camera
+  - imu
+  planner:
+  - detector
+stages:
+- checks:
+  - Verify images and IMU before explicitly starting Perception
+  description: Check camera images and IMU data
+  id: sensors
+  name: Sensors
+  workloads:
+  - camera
+  - imu
+- checks: []
+  description: ''
+  id: perception
+  name: Perception
+  workloads:
+  - detector
+- checks: []
+  description: ''
+  id: control
+  name: Control
+  workloads:
+  - planner
+workloads:
+  camera:
+    backend: systemd
+    name: ''
+    scope: user
+    unit: devdash-demo-camera.service
+  detector:
+    backend: systemd
+    name: ''
+    scope: user
+    unit: devdash-demo-detector.service
+  imu:
+    backend: systemd
+    name: ''
+    scope: user
+    unit: devdash-demo-imu.service
+  planner:
+    backend: systemd
+    name: ''
+    scope: user
+    unit: devdash-demo-planner.service

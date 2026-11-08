@@ -1,4 +1,4 @@
-"""Actual Tk controls + IPC + systemd/Docker; no devdash readiness Gate."""
+"""Actual Tk controls + IPC + systemd/Docker; no devdash readiness Gate or approval."""
 
 import asyncio
 import json
@@ -20,7 +20,7 @@ pytestmark = [
 ]
 
 
-async def test_gui_health_start_observation_continue_next_service(health_scenario):
+async def test_gui_health_start_observation_next_stage(health_scenario):
     from devdash.gui import Window
 
     h = await health_scenario()
@@ -48,7 +48,7 @@ async def test_gui_health_start_observation_continue_next_service(health_scenari
 
     try:
         await wait(lambda: window.connected)
-        select("group", "robot")
+        select("stage", "robot")
         click(window.buttons["start"])
         await h.health_wait()
         await wait(
@@ -56,8 +56,7 @@ async def test_gui_health_start_observation_continue_next_service(health_scenari
                 window.snapshot["observations"].get("container", {}).get("state") == "activating"
             )
         )
-        assert window.snapshot["run"]["waiting_gate"] is None
-        assert window.approve.instate(["disabled"])
+        assert window.next_button.instate(["disabled"])
         assert h.jobs() == [] and len(h.calls) == 1
         select("workload", "container")
         assert "Lifecycle Controller: systemd" in window.summary.cget("text")
@@ -65,7 +64,7 @@ async def test_gui_health_start_observation_continue_next_service(health_scenari
         h.release()
         await wait(
             lambda: (
-                window.snapshot["run"]["waiting_gate"] == "operator"
+                window.snapshot["run"]["status"] == "completed"
                 and window.snapshot["observations"].get("container", {}).get("health") == "healthy"
             )
         )
@@ -77,11 +76,10 @@ async def test_gui_health_start_observation_continue_next_service(health_scenari
             for child in obs["children"]
         )
         assert window.snapshot["observations"]["next"]["state"] == "inactive"
-        select("group", "robot")
-        assert "WAITING FOR CONTINUE" in window.texts["Progress"].get("1.0", "end-1c")
-        assert "[NEXT] start · workload · next" in window.texts["Progress"].get("1.0", "end-1c")
-        assert "Developer Continue: operator" in window.run.cget("text")
-        click(window.approve)
+        select("stage", "robot")
+        assert "[completed]" in window.texts["Progress"].get("1.0", "end-1c")
+        assert "Next: next" in window.next_button.cget("text")
+        click(window.next_button)
         await wait(
             lambda: (
                 window.snapshot["run"]["status"] == "completed"

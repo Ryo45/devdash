@@ -1,197 +1,144 @@
-# devdash
+# devdash — Stage方式の比較実装
 
-**Python + ttkbootstrap / Tkinter**製のLinux向けWorkloadダッシュボードです。
-Python版を本流として開発します。以前のRust + GPUI版は[`archive/rust-gpui`](https://github.com/Ryo45/devdash/tree/archive/rust-gpui)に保存しています。アプリの実行・ビルドにRustツールチェーンは不要です。
+`feature/staged-startup`ブランチの **Python + ttkbootstrap / Tkinter**版です。比較元のCoordinator方式は`main`の`d143e97`に残っています。このブランチをmainへマージする判断はまだしていません。
 
-![Python GUI](docs/python-gui.png)
+Stageは開発者が明示操作する順序付きリストです。選択StageのWorkloadだけにStart/Stop/Restartを要求し、結果を追跡します。後続Stageは自動起動しません。Nextは「選択Stageの次へのStart要求」で、承認ラッチや永続的な現在位置ではありません。
 
-Linuxのsystemd user/systemサービスと既存Dockerコンテナを、階層Group・順序付きSteps・Ready Gateで操作します。
-個々のサービスの実行管理はsystemd、Docker、supervisord、ROS 2 launchへ委譲します。自動復旧やロールバックはしません。
+実行管理・必須依存・起動Readyはsystemd / Docker / Supervisor / ROS 2 launchが所有します。devdashはSupervisor、自動復旧、依存DAG実行、独自のReady待機を実装しません。Execution、現在のHealth/Readiness、操作結果は別々に表示します。
 
-## セットアップ
+[比較レポート](docs/stage-comparison.md)／[生成・移行・適用手順](docs/stage-configuration.md)／[常駐運用](docs/resident-operation.md)
 
-Python 3.10以上を使用します。開発・検証にはUbuntu 24.04 / Python 3.12.3を使用しました。
-[uv](https://docs.astral.sh/uv/)がある場合:
+## セットアップと比較実行
+
+Ubuntu 22.04 / 24.04、Python 3.10以上を対象とします。検証環境はUbuntu 24.04 / Python 3.12.3です。GUIには`python3-tk`とディスプレイが必要です。
 
 ```bash
-uv sync --locked --extra gui --group dev
+uv sync --locked --extra gui --group dev --python /usr/bin/python3
+uv run devdash --version                 # 0.3.0.dev0 / Core IPC 2
 uv run devdash validate examples/robot.yaml
 ```
 
-uvを使わない場合:
+uvなしの場合は専用venvへ`pip install -e '.[gui]'`します。ROS環境とCore/GUIのvenvは分離します。Bridgeは独立した0.1.1 / IPC 1のままです。
+
+比較中は既存main版CoreとSocket・venvを分けてください。以下は生成だけで、systemd設定の適用やサービス起動は行いません。
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[gui]'
+uv run devdash generate examples/robot.yaml ./generated-robot        # 一覧・差分・内容をプレビュー
+uv run devdash generate examples/robot.yaml ./generated-robot --write
+uv run devdash --socket "$XDG_RUNTIME_DIR/devdash-stage/core.sock" \
+  daemon --config ./generated-robot/current/devdash.yaml
+# 別ターミナル
+uv run devdash-gui --socket "$XDG_RUNTIME_DIR/devdash-stage/core.sock"
 ```
 
-GUIにはディスプレイとTkinterが必要です。Ubuntuでは、venvに使うシステムPythonに合わせて導入します。
+`examples/robot.yaml`のunit参照を実環境に合わせてください。明示依存のdrop-inをまだsystemdへ適用していない場合、該当StageのStartはInspectionで拒否します。生成結果をレビューして明示適用する手順は[設定手順](docs/stage-configuration.md)を参照してください。unit本体のExecStartやRestartポリシーは生成し直しません。
 
-```bash
-sudo apt-get install -y python3-tk
-python3 -m tkinter
+旧Core/GUIとはIPCが非互換です。旧クライアントがStage版Coreへ操作を強行することはありません。既存のリリースタグは変更しません。
+
+## 設定と責務
+
+```yaml
+workloads:
+  camera:   {backend: systemd, scope: user, unit: camera.service}
+  imu:      {backend: systemd, scope: user, unit: imu.service}
+  detector: {backend: systemd, scope: user, unit: detector.service}
+stages:
+  - id: sensors
+    name: Sensors
+    workloads: [camera, imu]
+    description: Check camera images and IMU data
+    checks: [Verify images and IMU before explicitly starting Perception]
+  - id: perception
+    name: Perception
+    workloads: [detector]
+dependencies:
+  detector: [camera, imu]
 ```
 
-`python3 -m tkinter`で小さな確認用ウィンドウが開きます。uv管理の別Pythonを使う場合も、そのPythonがTkを利用できることを確認してください。
-UbuntuのシステムPythonを明示するなら`uv sync --locked --extra gui --group dev --python /usr/bin/python3`を使います。
-ヘッドレスCoreにはTkinterもGUI用依存も不要です。
+Stage順序と必須依存は別です。上記の明示依存だけから`Requisite=camera.service imu.service`と`After=...`を、所有するdrop-inへ生成します。前提unitを自動起動せず、起動済みであることをsystemdが要求します。依存は同じmanagerのsystemd Workload同士、前段Stageから後段Stageに限ります。同一Stage内の必須依存、逆行、循環、重複所属は拒否します。
 
-## 常駐運用・自動起動・更新
+既存unitのWants/Requires/PartOf/BindsTo等は保持します。Inspectionで起動の前倒し・停止伝播・順序矛盾・Conflicts・未適用依存を診断します。既知の矛盾と選択unitの取得失敗はStage操作を拒否します。動的トリガーなど未解析の間接作用は警告として残し、完全な安全性を保証しません。
 
-Core/GUIは`devdash-python 0.2.1`、ROS Bridgeは独立した`devdash-roslaunch 0.1.1`です。
-[常駐運用手順](docs/resident-operation.md)に、版固定インストール、配置、更新・ロールバック、互換性とトラブルシューティングをまとめています。
+| Lifecycle | 内部観測 | 任意の子操作 |
+| --- | --- | --- |
+| systemd user/system | systemd | host Supervisor / ROS Bridge |
+| systemd user/system | `observer.docker`のDocker API | コンテナ内Supervisor / ROS Bridge |
+| Docker Engine（既存直接管理） | Docker API | コンテナ内Supervisor / ROS Bridge |
 
-本番用はレビュー済みの`v0.2.1`等へソースを固定し、wheelとハッシュ付き依存一覧から専用venvを作ります。
+`backend`は親Lifecycle、`controller`は内部Supervisor/Bridgeです。名称を混在させません。HTTPは`observer.http: {url: ..., expected_status: 200, timeout_ms: 1500}`で読み取り観測できます。HTTP/Docker Healthが不明・異常でも、Coreは起動Readyを推測したり再起動したりしません。
+
+[systemd + Docker](examples/systemd-docker.yaml)、[Docker直接管理](examples/docker-supervisor.yaml)、[ROS Bridge](examples/roslaunch-bridge.yaml)、[HTTP観測](examples/http-observer.yaml)、[system manager](examples/system-robot.yaml)、[systemd側Health待機PoC](examples/systemd-docker-health/)を参照してください。
+
+## GUI / CLI操作
+
+GUIはStage順にWorkloadと内部要素を表示します。Stageを選ぶと説明・確認事項・対象・現在の操作結果を表示し、Nextボタンには次のStageと対象Workloadを明記します。Stageを直接選択してStartできます。現在activeという観測だけで過去のStage操作を成功と扱いません。
 
 ```bash
+# 各コマンドは要求受付。完了・部分成功・エラーはstatusで確認します。
+devdash stage start sensors
+devdash status
+devdash next sensors                 # perceptionへ明示Start。自動カーソルなし
+devdash stage restart perception     # 対象だけBackend Restart。後続は再実行しない
+devdash workload stop camera
+devdash cancel                      # 発行済みジョブは取消・ロールバックしない
+devdash check perception
+devdash logs detector
+```
+
+比較用Socketを使う場合は各コマンドの先頭に`--socket "$XDG_RUNTIME_DIR/devdash-stage/core.sock"`を付けてください。Stageメンバーは独立した要求として並列発行し、一部失敗しても発行済み結果をすべて追跡します。既にactiveなunitへのStartはsystemdに委譲し、不必要なRestartは発行しません。全体停止は必要なStageを逆順で明示Stopしてください。
+
+GUI終了・Core終了はWorkload停止ではありません。Core復旧時は新しい観測基準を取得し、過去の操作は再実行・成功推定しません。通信断はstaleとして表示し、GUI操作を無効にして復旧を待ちます。Core/GUIの版・接続・互換性も表示します。
+
+## Configuration Editor / Generator
+
+GUIのConfiguration Editor、または`devdash edit ./robot-source.yaml`で開きます。
+
+- Workload追加・削除・既存unitのScan候補選択、Lifecycle/Observer/Child Controller設定。
+- Stage追加・削除・並び替え、Workload割り当て、説明と確認事項。
+- 必須依存の指定、検証、ライブ依存Inspection。
+- 生成ファイル一覧・追加/変更/削除のdiff、Gitディレクトリへの保存。
+
+フォーム編集はApplyで編集モデルへ反映し、Saveは編集元だけを保存します。Generateは同じモデルから実行YAMLとdrop-inの世代を作り、検証後に`current`を原子的に切り替えます。保存・生成でCoreは再読込されず、systemdのdaemon-reloadやLifecycle要求も発行しません。
+
+Scan / Importは編集候補または編集元へ反映します。生成済みYAMLを直接書き換えません。
+
+```bash
+devdash scan user
+devdash source-import ./robot-source.yaml user camera.service
+devdash generate ./robot-source.yaml ./generated --inspect          # 任意のライブ検査
+devdash generate ./robot-source.yaml ./generated --write
+# 必要なdrop-inを手動レビュー・適用してから
+devdash reload                                                     # Core設定の明示再読込だけ
+```
+
+再読込中に古い観測が戻っても破棄し、変更後のStageへ古い操作成功を流用しません。操作中の再読込は拒否します。Generatorの所有ファイルを手編集した場合は上書きを拒否し、無関係なファイルは管理しません。
+
+## 旧設定からの移行
+
+```bash
+devdash migrate old-coordinator.yaml                               # 変換候補と警告だけ
+devdash migrate old-coordinator.yaml --output new-stage-source.yaml
+```
+
+旧Workload定義を保持し、Parallelは同一Stage、逐次Stepは別Stage、Manual Gateは開発者向けチェックへ変換する候補を提示します。必須依存は推測せず、編集元で明示してください。HTTP/container_ready Gateは条件を移行レポートへ保持し、Ready委譲の確認なしに出力しません。必要なunit側対応を確認後だけ`--ack-readiness-delegation`で新規ファイルへ保存できます。旧ファイルを上書きしません。
+
+## 検証
+
+```bash
+uv run pytest -q tests/python -m 'not integration and not gui'
+# ディスプレイと実user manager、専用イメージがある環境のみ
+DEVDASH_GUI_TEST=1 DEVDASH_SYSTEMD_TEST=1 DEVDASH_DOCKER_TEST=1 uv run pytest -q tests/python
+uv run ruff check devdash tests/python examples/systemd-docker-health
+uv run ruff format --check devdash tests/python examples/systemd-docker-health
 uv build --wheel
-uv export --locked --no-dev --extra gui --no-emit-project --output-file dist/devdash-0.2.1-requirements.txt
-DEVDASH_RELEASE="$HOME/.local/share/devdash/versions/0.2.1"
-uv venv --python /usr/bin/python3 "$DEVDASH_RELEASE"
-uv pip install --python "$DEVDASH_RELEASE/bin/python" --require-hashes -r dist/devdash-0.2.1-requirements.txt
-uv pip install --python "$DEVDASH_RELEASE/bin/python" --no-deps dist/devdash_python-0.2.1-py3-none-any.whl
-ln -sfn "$DEVDASH_RELEASE" "$HOME/.local/share/devdash/current"
 ```
 
-`~/.config/devdash/config.yaml`を用意・validateした後、必要なものだけ明示的に有効化します。
-同じSocketを使う手動起動のCoreがあれば、そのCoreだけを先に終了してください。Workloadを停止する必要はありません。
-
-```bash
-mkdir -p "$HOME/.config/systemd/user" "$HOME/.config/autostart"
-"$HOME/.local/share/devdash/current/bin/devdash" template core > "$HOME/.config/systemd/user/devdash-core.service"
-systemctl --user daemon-reload
-systemctl --user enable --now devdash-core.service
-# ログイン前からCoreを起動する場合のみ。devdashは実行しません。
-loginctl enable-linger "$USER"
-# デスクトップログイン時にGUIを開く場合のみ。
-"$HOME/.local/share/devdash/current/bin/devdash" template autostart > "$HOME/.config/autostart/devdash.desktop"
-```
-
-Coreは観測だけで起動し、Robotを自動起動しません。GUIを閉じてもCoreとWorkloadは継続します。
-GUIは通信断中の表示をstaleとし、操作を無効化して復旧を待ちます。同じSocketのGUIは既定で一つ、`--new-window`で明示的に増やせます。
-版・接続状態はGUIに表示し、非互換IPCや古いCore/Bridge世代の操作を拒否します。中断したシーケンスは再開せず、応答を失った操作を自動再送しません。
-
-更新時は新しい版を別の`versions/<version>`へ導入・確認し、進行中操作が完了してからGUIを閉じ、次を行います。
-
-```bash
-systemctl --user stop devdash-core.service
-ln -sfn "$DEVDASH_RELEASE" "$HOME/.local/share/devdash/current"
-systemctl --user start devdash-core.service
-"$HOME/.local/share/devdash/current/bin/python" -I -m devdash.gui
-```
-
-ロールバックは、保管した互換性のある旧venvへ`DEVDASH_RELEASE`を設定し、版と設定を確認して同じ手順で戻します。
-Core停止・更新は管理対象のStop/Restartを発行しません。承認は同じboot IDなら保持し、シーケンス結果は復元しません。
-ROS BridgeはROS側へ別途インストールし、Core/GUIの更新に合わせて毎回更新する必要はありません。
-
-困った場合は`systemctl --user status devdash-core.service`、`journalctl --user -u devdash-core.service -b`、
-`devdash --version`、`devdash status`で実行パス・版・権限・接続を確認してください。PolkitやDocker socketの権限はCore実行ユーザーで評価されます。
-
-## 起動
-
-既存サービスに合わせてサンプルYAMLのunit名を編集します。devdashはunitやコンテナを作成しません。
-別々のターミナルで実行してください。
-
-```bash
-uv run devdash daemon --config examples/robot.yaml
-uv run devdash-gui
-```
-
-GUIを閉じてもCoreとGate待機は継続します。Core終了時にも既存サービスを停止しません。
-既定のソケットは`$XDG_RUNTIME_DIR/devdash-python/core.sock`、承認ファイルは`$XDG_STATE_HOME/devdash-python/approvals.json`
-（未指定なら`~/.local/state`以下）です。Rust版の既定パスとは分離しています。
-同じ実サービスを双方から同時に操作するのは避けてください。
-
-```bash
-uv run devdash status
-uv run devdash group start robot
-uv run devdash approve sensors_ready
-uv run devdash group restart perception
-uv run devdash group reinitialize robot
-uv run devdash cancel
-uv run devdash workload restart detector
-uv run devdash check robot
-uv run devdash logs detector
-uv run devdash scan user
-uv run devdash scan system
-uv run devdash import system your-existing.service
-```
-
-Group/Workload操作は受付後にCoreで継続します。結果はGUIか`status`で確認します。
-個別Workload操作はGateを迂回します。Group Restartは逆順停止→正順起動、通常のRestartはManual Gate承認を再利用します。
-Cancelは未発行Stepをスキップし、発行済みsystemdジョブの結果は追跡します。
-
-GUIのツリーから対象を選択し、Start/Stop/Restartを押します。Manual Gate待機中にContinueを押すと続行します。
-Detailsにmanager、状態、PID、観測値、子要素の操作能力を表示します。Progress/Diagnostics/Events/Logsで進捗・診断・状態変化・ログを確認できます。
-Scan / Importは要求時のみサービスを列挙し、選択した行のunit参照だけを設定へ追加します（複数選択はCtrl/Shift）。Import時にも対象managerで存在を確認し、未知のunitを含む一括Importは拒否します。元設定は`.yaml.bak`へ保存します。
-設定の手編集はCore再起動後に反映します。稼働中に手編集した設定はImportで上書きしません。
-
-system unitの操作ではD-Busのinteractive authorizationを許可し、systemd/Polkitに認可を委譲します。
-デスクトップのPolkitエージェントと適切な権限が必要です。認可できなければ理由を表示し、GUIをrootで起動したり独自の昇格デーモンを使ったりはしません。
-journalログも現在ユーザーの閲覧権限の範囲になります。
-
-## Lifecycle・内部観測・承認（main）
-
-`backend`は親WorkloadのStart/Stop/Restartの委譲先です。systemd管理コンテナには`observer.docker`を指定し、Lifecycleはsystemd、内部プロセスとHealthはDocker APIで扱えます。従来のDocker直接管理と、ホストのROS Bridge設定も維持します。`controller`は内部Supervisor/Bridge専用で、親Lifecycleとは別です。
-
-GUIはExecution、Readiness / Health、Lifecycle Controller、Internal Observer / Child Controllerを分けて表示します。GroupのProgressでは完了・承認待ち・次のStepを確認でき、Manual GateのContinueは開発者の続行許可として扱います。観測不能や未実行をReady/完了とは表示しません。
-
-[systemdジョブでHealthを待つPoCと検証結果](docs/health-start-verification.md)も用意しています。Core側のReadiness Gateを使わず、systemdのStart完了→GUI Continue→次サービス起動と、失敗・Cancel・Stop/Restartを実測しています。
-
-[systemd + Dockerの設定例](examples/systemd-docker.yaml)と[責務分担・Ready委譲方針・制約](docs/lifecycle-observer-gates.md)を参照してください。この追加機能は現在のmainに含まれ、既存のv0.2.1タグは変更しません。タグは大きなリリース時に付けます。
-
-## 自己管理の防止
-
-Core/GUI自身のunitは管理対象にできません。既定名は設定で拒否し、別名やaliasはD-Busの所属unit・ExecStartを使ってImport時と操作直前にも確認します。
-Core自体の再起動は`systemctl --user restart devdash-core.service`等で行ってください。ROS BridgeのWorkloadは引き続き操作できます。
-判定範囲・テスト・今回のコード整理は[自己管理防止の記録](docs/self-protection.md)を参照してください。
-
-## 構成
-
-- `devdash/model.py`: YAML検証、Group展開、安定したWorkload参照。
-- `devdash/engine.py`: asyncioによる順序付きSteps、Gate、Cancel、承認永続化、観測イベント。
-- `devdash/inspection.py`: systemd依存関係の純粋な診断。実行順序を決定するDAGではありません。
-- `devdash/presentation.py`: GUI非依存の責務表示・Group進捗の整形。
-- `devdash/adapters/`: D-Bus、Docker Engine API、既存Supervisorへの操作委譲。
-- `devdash/ipc.py`: ローカルUnix SocketとCoreプロセス。
-- `devdash/gui.py`: ttkbootstrap/Tkinterクライアント。IPCはGUIスレッド外で実行します。
-- `bridges/roslaunch/`: 既存の独立したPython ROS 2 Bridgeを再利用。
-
-[D-Busイベント追跡・検査の制約と比較結果](docs/python-alternative.md)、[コンテナとROS連携](docs/container-processes-and-roslaunch.md)も参照してください。
-
-## テスト
-
-```bash
-# テストにはdbus-daemonが必要（Ubuntuでは sudo apt-get install -y dbus-daemon）
-uv run pytest -q
-DEVDASH_GUI_TEST=1 uv run pytest -q tests/python/test_gui.py
-DEVDASH_SYSTEMD_TEST=1 uv run pytest -q tests/python/test_systemd.py
-```
-
-GUIテストにはディスプレイが必要です。CIなどでは`xvfb`を導入し、`DEVDASH_GUI_TEST=1 xvfb-run -a uv run pytest -q tests/python/test_gui.py`で実行できます。
-
-systemdテストは実際のuser managerを使用し、一意な`devdash-py-it-*` runtime unitだけを作成・操作・削除します。
-既存の実サービスは操作しません。起動したシェル配下のsleepもsystemdのcontrol groupで終了します。
-
-Dockerの任意テスト:
+Dockerの専用fixtureが未作成なら、明示的に一度ビルドします。
 
 ```bash
 docker build -t devdash-supervisor-test:4.3.0 tests/fixtures/supervisor
-DEVDASH_DOCKER_TEST=1 uv run pytest -q tests/python/test_docker.py
 ```
 
-```bash
-uv run ruff check devdash tests/python
-uv run ruff format --check devdash tests/python
-```
+テストは一意な`devdash-py-it-*` user unitと専用コンテナだけを操作し、既存サービスやlingerを変更しません。system managerの実テストは読み取りのみで、認可拒否は疑似D-Busでも検証します。ROSの実環境固有テストは従来の`tools/run_roslaunch_tests.py`を利用します。
 
-Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性・Lifecycle/Observer分離の追加分も含め、パラメーター化した237テストを検証しています。
-専用D-Busの返信順序・切断・再接続、実user unit、専用Docker、Tkinter GUI、別CoreプロセスのIPCを含みます。
-常駐運用の追加テストにはCoreのSIGTERM/SIGKILL、GUIの通信断復旧、旧/非互換IPC、配布unitでの自動再起動とWorkloadのPID維持を含みます。
-対応表と移植中に見つかった不具合、テストの書きやすさの比較は[テスト復元記録](docs/test-restoration.md)を参照してください。
-ROS 2 Jazzyの任意テストと制約は[Bridge README](bridges/roslaunch/README.md)を参照してください。
-
-## ライセンス
-
-アプリ本体はMIT OR Apache-2.0です。GUIはttkbootstrap 2.2.7、Pillow、Python標準のTkinterとOSのTcl/Tkを使用します。
-PySide6・shiboken6は依存から除きました。取得した配布物のライセンス表記と変更点は[GUIライブラリの記録](docs/gui-toolkit.md)を参照してください。
+旧テストの対応・削除した状態管理・9シナリオの操作比較・既知の制限は[比較レポート](docs/stage-comparison.md)にまとめています。MIT / Apache-2.0、GUIは引き続きttkbootstrap / Tkinterです。Rust + GPUI版は`archive/rust-gpui`に保存しています。

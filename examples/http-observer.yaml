@@ -1,0 +1,19 @@
+workloads:
+  api:
+    backend: systemd
+    unit: my-api.service
+    name: ''
+    scope: user
+    observer:
+      http:
+        url: http://127.0.0.1:8080/health
+        expected_status: 200
+        timeout_ms: 1500
+stages:
+- id: api
+  workloads:
+  - api
+  name: api
+  description: ''
+  checks: []
+dependencies: {}
