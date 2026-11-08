@@ -1,0 +1,15 @@
+# Example only. Review paths/container ownership, then install explicitly.
+# The existing container MUST be exclusively owned by this unit.
+[Unit]
+Description=Robot container with systemd-owned startup Health wait
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/docker start --attach robot-dev
+ExecStartPost=/usr/bin/python3 /usr/local/libexec/devdash-wait-health.py --timeout 45 robot-dev
+ExecStop=/usr/bin/docker stop --time 5 robot-dev
+# ExecStop is skipped when startup fails; this handles that path too.
+ExecStopPost=/usr/bin/docker stop --time 5 robot-dev
+TimeoutStartSec=50
+TimeoutStopSec=15
+Restart=no

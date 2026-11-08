@@ -103,3 +103,29 @@ async def until(predicate, timeout=2):
             await asyncio.sleep(0.005)
 
     await asyncio.wait_for(wait(), timeout)
+
+
+@pytest.fixture
+async def health_scenario(tmp_path, monkeypatch):
+    """Only requested by opt-in dedicated unit/container integration tests."""
+    from unittest.mock import AsyncMock
+
+    from health_scenario import HealthScenario
+
+    from devdash.adapters.docker import DockerAPI
+
+    forbidden = AsyncMock(side_effect=AssertionError("Docker Lifecycle bypassed systemd"))
+    monkeypatch.setattr(DockerAPI, "operate", forbidden)
+    scenarios = []
+
+    async def create(**options):
+        scenario = HealthScenario(tmp_path)
+        scenarios.append(scenario)
+        return await scenario.start(**options)
+
+    try:
+        yield create
+    finally:
+        for scenario in reversed(scenarios):
+            await scenario.close()
+        forbidden.assert_not_awaited()

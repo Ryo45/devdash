@@ -63,15 +63,15 @@ GroupのProgressタブは、正順Start・逆順Stop・Restartの両フェーズ
 
 ## Docker Healthをsystemd起動完了へ委譲する方針
 
-今回はunitを変更するhelperは追加していません。アプリが対応するならType=notifyによるReady通知を優先します。既存のDocker向けunitでHealth待ちを加える場合は、利用者がGit管理するunitの`ExecStartPost`から、期限付き・読み取り専用のHealth待機を実行する小さな構成を次の候補とします。
+アプリが対応するならType=notifyによるReady通知を優先します。Docker向けには、unitの`ExecStartPost`から実行する[期限付きHealth待機PoC](../examples/systemd-docker-health/wait_health.py)と[unit例](../examples/systemd-docker-health/robot-container.service)を追加し、実際のStartジョブ・失敗・Cancel・Stop/Restart・GUI Continueを検証しました。[実測結果と制限](health-start-verification.md)を参照してください。
 
-そのhelperは対象コンテナを解決しHealthがhealthyになるまで確認し、期限切れ・消失・検査不能は失敗終了します。Healthcheck未設定を自動的にhealthyと見なさず、Running代替を使うなら明示します。systemdのStartジョブはExecStartPost完了まで待ち、失敗後の停止・再起動方針もunit側が所有します。Docker CLIの終了だけではコンテナが止まらない場合があるため、起動失敗時にExecStopが実行されると仮定せず、必要なExecStopPost等もunit側で検証します。常駐監視や独自Supervisorは不要です。導入時のunit差分・失敗時動作を検証してから利用者自身が適用する方針で、devdashが自動編集・daemon-reloadすることはありません。
+helperは起動時だけDocker Healthを読み取り、期限切れ・消失・検査不能・Health未設定を成功と扱いません。失敗後にコンテナを停止する方針はunitのExecStopPostに明示します。常駐監視・独自Supervisorは追加せず、unitの編集・適用は利用者が行います。
 
 参照：[systemd.service（TypeとExecStartPost）](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)、[Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.45/)。
 
 ## 検証と制約
 
-全218ケースが成功しました。Ruff、サンプル設定のvalidate、wheelビルドも確認しています。
+全237ケースが成功しました。Ruff、サンプル設定のvalidate、wheelビルドも確認しています。
 
 Fake/Docker API stubでLifecycleの操作先、HealthとExecutionの分離、Supervisor操作、切断・タイムアウト・復旧、Core再起動、Gate継続仕様、Inspectionを検証します。既存のBridge互換性・epochテストを維持します。実Tk GUIと、専用の一時user unitからDockerコンテナを起動する統合テストも含みます。既存サービス、linger、自動起動設定は変更しません。
 

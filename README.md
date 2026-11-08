@@ -136,6 +136,8 @@ journalログも現在ユーザーの閲覧権限の範囲になります。
 
 GUIはExecution、Readiness / Health、Lifecycle Controller、Internal Observer / Child Controllerを分けて表示します。GroupのProgressでは完了・承認待ち・次のStepを確認でき、Manual GateのContinueは開発者の続行許可として扱います。観測不能や未実行をReady/完了とは表示しません。
 
+[systemdジョブでHealthを待つPoCと検証結果](docs/health-start-verification.md)も用意しています。Core側のReadiness Gateを使わず、systemdのStart完了→GUI Continue→次サービス起動と、失敗・Cancel・Stop/Restartを実測しています。
+
 [systemd + Dockerの設定例](examples/systemd-docker.yaml)と[責務分担・Ready委譲方針・制約](docs/lifecycle-observer-gates.md)を参照してください。この追加機能は現在のmainに含まれ、既存のv0.2.1タグは変更しません。タグは大きなリリース時に付けます。
 
 ## 自己管理の防止
@@ -183,7 +185,7 @@ uv run ruff check devdash tests/python
 uv run ruff format --check devdash tests/python
 ```
 
-Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性・Lifecycle/Observer分離の追加分も含め、パラメーター化した218テストを検証しています。
+Rust版の65テストが保証していた振る舞いをPythonへ移植し、常駐運用・互換性・Lifecycle/Observer分離の追加分も含め、パラメーター化した237テストを検証しています。
 専用D-Busの返信順序・切断・再接続、実user unit、専用Docker、Tkinter GUI、別CoreプロセスのIPCを含みます。
 常駐運用の追加テストにはCoreのSIGTERM/SIGKILL、GUIの通信断復旧、旧/非互換IPC、配布unitでの自動再起動とWorkloadのPID維持を含みます。
 対応表と移植中に見つかった不具合、テストの書きやすさの比較は[テスト復元記録](docs/test-restoration.md)を参照してください。
