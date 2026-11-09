@@ -30,7 +30,9 @@ def parser():
     plan = commands.add_parser("plan")
     plans = plan.add_subparsers(dest="plan_command", required=True)
     preview = plans.add_parser("preview")
-    preview.add_argument("kind", choices=("startup", "restart_from", "stop_from"), nargs="?")
+    preview.add_argument(
+        "kind", choices=("startup", "start_missing", "restart_from", "stop_from"), nargs="?"
+    )
     preview.add_argument("--from-stage")
     preview.add_argument("--template")
     execute = plans.add_parser("execute")

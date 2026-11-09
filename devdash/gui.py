@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fcntl
+import gc
 import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from tkinter import Misc
 from tkinter.scrolledtext import ScrolledText
 
 import ttkbootstrap as ttk
@@ -118,7 +120,7 @@ class Window(ttk.Window):
         ttk.Label(plan_controls, text="On-demand Plan: ").pack(side="left")
         self.plan_kind = ttk.Combobox(
             plan_controls,
-            values=("startup", "restart_from", "stop_from"),
+            values=("startup", "start_missing", "restart_from", "stop_from"),
             state="readonly",
             width=18,
         )
@@ -356,6 +358,7 @@ class Window(ttk.Window):
         set_text(self.texts["Plan"], plan_progress(value))
         choices = (
             "startup",
+            "start_missing",
             "restart_from",
             "stop_from",
             *["template:" + key for key in config.get("plan_templates", {})],
@@ -478,7 +481,7 @@ class Window(ttk.Window):
             command["template"] = choice.removeprefix("template:")
         else:
             command["kind"] = choice
-            if choice != "startup":
+            if choice not in ("startup", "start_missing"):
                 if not self.selection or self.selection[0] != "stage":
                     self.error.configure(text="Select the first Stage of the requested suffix")
                     return
@@ -540,7 +543,17 @@ class Window(ttk.Window):
         if self.timer:
             self.after_cancel(self.timer)
         self.pool.shutdown(wait=False, cancel_futures=True)
+        self.pending.clear()  # Bound callbacks can keep a destroyed Tk root in a cycle.
         self.destroy()
+        self._style = None
+        self.buttons.clear()
+        self.texts.clear()
+        for name, value in list(vars(self).items()):
+            if isinstance(value, Misc):
+                setattr(self, name, None)
+        # Tcl image/font/widget cycles must be collected by their creating thread,
+        # even when IPC workers outlive the window. Workers never access Tk.
+        gc.collect()
 
 
 class PlanDialog(ttk.Toplevel):

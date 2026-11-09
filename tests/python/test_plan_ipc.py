@@ -109,3 +109,33 @@ async def test_fresh_observation_change_rejects_old_continue_and_freezes_reload(
         await request(socket, dict(command="reload"))
     await request(socket, dict(command="plan_cancel", run_id=run["id"]))
     await engine.wait()
+
+
+async def test_cli_and_ipc_start_missing_preview_reports_fresh_skip(plan_core, backend):
+    from devdash.model import observation
+
+    engine, _, socket = plan_core
+    backend.observations["camera"] = observation(state="active")
+    cli = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "devdash",
+        "--socket",
+        str(socket),
+        "plan",
+        "preview",
+        "start_missing",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    output, error = await cli.communicate()
+    assert cli.returncode == 0, error.decode()
+    preview = json.loads(output)
+    assert preview["steps"][0]["preview"]["camera"]["action"] == "skip"
+    assert not backend.calls
+    await request(socket, dict(command="plan_execute", preview_id=preview["id"]))
+    await until(lambda: engine.snapshot()["plan"] and engine.snapshot()["plan"]["checkpoint"])
+    assert backend.calls == [("imu", "start")]
+    run = engine.snapshot()["plan"]
+    await request(socket, dict(command="plan_cancel", run_id=run["id"]))
+    assert (await engine.wait())["status"] == "cancelled"

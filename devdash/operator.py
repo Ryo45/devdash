@@ -149,7 +149,9 @@ class Operator:
             progress["status"] = "skipped" if result is False else "completed"
             progress["dispatch"] = "not_issued" if result is False else "finished"
 
-    async def batch(self, target, members, stage, action, *, leases=None, config=None):
+    async def batch(
+        self, target, members, stage, action, *, leases=None, config=None, prepare=None
+    ):
         config = config or self.config
         scopes = {
             config.workloads[key]["scope"]
@@ -185,6 +187,8 @@ class Operator:
                         + report["incomplete"]
                     )
                 )
+        if prepare is not None and not self.cancel.is_set():
+            members = await prepare()
         if self.cancel.is_set():
             self.run["progress"].extend(
                 [dict(workload=key, action=action, status="skipped", error=None) for key in members]

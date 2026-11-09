@@ -194,3 +194,29 @@ def test_invocation_signals_are_owner_pinned_deduplicated_and_not_job_results():
     assert [args[1] for args, _ in backend.events] == ["invocation_changed"] * 2
     assert [facts["invocation_id"] for _, facts in backend.events] == ["01" * 16, "02" * 16]
     assert not session.jobs and not session.early and not session.issuing
+
+
+async def test_missing_service_properties_are_unknown_readiness_not_unprovided():
+    from types import SimpleNamespace
+
+    from devdash.adapters.systemd import Systemd
+    from devdash.model import Config
+
+    config = Config(dict(workloads={"a": {"backend": "systemd", "unit": "a.service"}}))
+    adapter = Systemd(config)
+
+    async def unit(name):
+        return "/unit/a", dict(Id=name, ActiveState="active", LoadState="loaded")
+
+    async def properties(*args):
+        raise BusError("org.freedesktop.DBus.Error.AccessDenied", "unavailable")
+
+    adapter.sessions["user"] = SimpleNamespace(
+        unit=unit, properties=properties, check=lambda: None, generation=1, lost=asyncio.Event()
+    )
+    value = await adapter.observe(config.workloads["a"])
+    assert value["state"] == "active"
+    assert (
+        value["readiness"]["state"] == "unknown"
+        and value["readiness"]["source"] == "systemd service"
+    )

@@ -224,8 +224,7 @@ class HealthScenario:
                 "systemctl",
                 "--user",
                 "stop",
-                self.units["next"],
-                self.units["container"],
+                *reversed(list(self.units.values())),
                 check=False,
             )
             await self.command_process(

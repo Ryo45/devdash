@@ -274,11 +274,11 @@ class Config:
             require(isinstance(key, str) and key, "Invalid Plan Template ID")
             fields(template, {"kind", "from_stage", "name"}, "Plan Template")
             require(
-                template.get("kind") in ("startup", "restart_from", "stop_from"),
+                template.get("kind") in ("startup", "start_missing", "restart_from", "stop_from"),
                 "Unknown Plan Template kind",
             )
             require(isinstance(template.get("name", key), str), "Invalid Template name")
-            if template["kind"] == "startup":
+            if template["kind"] in ("startup", "start_missing"):
                 require("from_stage" not in template, "Startup Template uses all Stages")
             else:
                 self.stage(template.get("from_stage"))

@@ -48,6 +48,9 @@ dependencies:
   planner:
   - detector
 plan_templates:
+  recover_current:
+    name: Start missing Workloads from current state
+    kind: start_missing
   first_start:
     name: Initial staged startup
     kind: startup

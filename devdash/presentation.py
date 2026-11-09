@@ -102,6 +102,8 @@ def plan_progress(snapshot):
             + summary["status"]
             + "; execution state and confirmation discarded.\n"
             + json.dumps(summary, indent=2, ensure_ascii=False)
+            + "\nIssued operations and adapter results:\n"
+            + json.dumps(snapshot["run"]["progress"], indent=2, ensure_ascii=False)
         )
     lines = [
         f"Run: {plan['id']} · Template: {plan['template']}",
@@ -113,8 +115,17 @@ def plan_progress(snapshot):
             f"{index:02d} [{step['status']}] {step.get('action', 'Checkpoint')} {step['stage']} · {', '.join(step['workloads'])}"
         )
         lines.extend("  Check: " + item for item in step.get("checks", []))
+        for field, label in (("preview", "Preview"), ("assessment", "Actual decision")):
+            for key, decision in step.get(field, {}).items():
+                lines.append(f"  {label}: {key} {decision['action']} — {decision['reason']}")
         if step.get("error"):
             lines.append("  " + step["error"])
+    lines.extend(
+        [
+            "Issued operations and adapter results:",
+            json.dumps(snapshot["run"]["progress"], indent=2, ensure_ascii=False),
+        ]
+    )
     if checkpoint := plan.get("checkpoint"):
         lines.extend(
             [

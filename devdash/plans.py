@@ -8,14 +8,15 @@ import uuid
 from collections import OrderedDict
 
 from .model import Config
+from .start_missing import assess, changed
 
-KINDS = {"startup", "restart_from", "stop_from"}
+KINDS = {"startup", "start_missing", "restart_from", "stop_from"}
 
 
 def steps_for(config, kind, from_stage=None):
     if kind not in KINDS:
         raise ValueError("Unknown standard Plan kind")
-    if kind == "startup":
+    if kind in ("startup", "start_missing"):
         if from_stage is not None:
             raise ValueError("Startup uses all Stages; no from_stage")
         stages = config.stages
@@ -80,6 +81,17 @@ class PlanExecutor:
             steps=steps_for(config, kind, from_stage),
             note="Preview only. Empty checks add no Checkpoint; final Stage has no Checkpoint. systemd may affect units outside the requested scope.",
         )
+        if kind == "start_missing":
+            values = self.observer.current()
+            for step in plan["steps"]:
+                if step["kind"] == "operation":
+                    step["preview"] = {
+                        key: assess(config.workloads[key], values.get(key, {}))
+                        for key in step["workloads"]
+                    }
+            plan["note"] += (
+                " Start missing re-observes before dispatch and after jobs. Blocked/changed state ends the Run; no readiness polling or retry."
+            )
         self.previews[plan["id"]] = (copy.deepcopy(plan), config)
         while len(self.previews) > 8:
             self.previews.popitem(last=False)
@@ -103,6 +115,7 @@ class PlanExecutor:
             signal=asyncio.Event(),
             confirmed=None,
             leases={},
+            state_baseline={},
         )
         self.operator._launch(run["id"], "plan", preview["kind"], lambda: self.execute(run))
         self.previews.pop(preview_id)
@@ -224,6 +237,10 @@ class PlanExecutor:
             raise RuntimeError("Manager changed; Plan outcome unknown")
         if run["confirmed"] is not None:
             raise ValueError("Checkpoint already acknowledged")
+        if run["kind"] == "start_missing":
+            decisions = self.decisions(run, checkpoint["workloads"])
+            self.check_decisions(decisions, active=checkpoint["workloads"])
+            run["state_baseline"].update(decisions)
         run["confirmed"] = token
         run["signal"].set()
 
@@ -265,6 +282,45 @@ class PlanExecutor:
             await asyncio.gather(*lost, return_exceptions=True)
             run["checkpoint"] = run["confirmed"] = None
 
+    def decisions(self, run, members):
+        values = self.observer.current()
+        return {key: assess(run["config"].workloads[key], values.get(key, {})) for key in members}
+
+    def check_decisions(self, decisions, expected=None, active=()):
+        problems = []
+        for key, value in decisions.items():
+            if value["action"] == "blocked":
+                problems.append(f"{key}: {value['reason']}")
+            elif expected and key in expected and changed(expected[key], value):
+                problems.append(
+                    f"{key}: blocked preview or active state/generation changed; preview a new Plan"
+                )
+            elif key in active and value["action"] != "skip":
+                problems.append(f"{key}: no longer active after startup; {value['reason']}")
+        if problems:
+            raise RuntimeError("Start missing stopped: " + "; ".join(problems))
+
+    async def observe_missing(self, run):
+        await self.observer.poll()
+        if any(lease.is_set() for lease in run["leases"].values()):
+            raise RuntimeError("Manager changed; operation outcome unknown; not resumed")
+
+    async def prepare_missing(self, run, step):
+        # Called by the shared Operator after Inspection and before any dispatch.
+        await self.observe_missing(run)
+        if self.operator.cancel.is_set():
+            return []
+        previous = []
+        for stage in run["config"].stages:
+            if stage["id"] == step["stage"]:
+                break
+            previous.extend(stage["workloads"])
+        decisions = self.decisions(run, previous + step["workloads"])
+        step["assessment"] = {key: decisions[key] for key in step["workloads"]}
+        self.check_decisions(decisions, run["state_baseline"], previous)
+        run["state_baseline"].update(decisions)
+        return [key for key in step["workloads"] if decisions[key]["action"] == "start"]
+
     async def execute(self, run):
         outcome = "interrupted"
         try:
@@ -276,6 +332,16 @@ class PlanExecutor:
                 if (work := run["config"].workloads[key])["backend"] == "systemd"
             }
             run["leases"] = {scope: self.operator.backend.lease(scope) for scope in scopes}
+            if run["kind"] == "start_missing" and not self.operator.cancel.is_set():
+                await self.observe_missing(run)
+                expected = {
+                    key: value
+                    for step in run["steps"]
+                    for key, value in step.get("preview", {}).items()
+                }
+                run["initial_assessment"] = self.decisions(run, expected)
+                self.check_decisions(run["initial_assessment"], expected)
+                run["state_baseline"].update(run["initial_assessment"])
             for step in run["steps"]:
                 if self.operator.cancel.is_set():
                     step["status"] = "skipped"
@@ -291,7 +357,24 @@ class PlanExecutor:
                             step["action"],
                             leases=run["leases"],
                             config=run["config"],
+                            prepare=(lambda: self.prepare_missing(run, step))
+                            if run["kind"] == "start_missing"
+                            else None,
                         )
+                        if run["kind"] == "start_missing" and not self.operator.cancel.is_set():
+                            await self.observe_missing(run)
+                            # Only the started prefix is required active, not future Stages.
+                            boundary = run["config"].stages.index(
+                                run["config"].stage(step["stage"])
+                            )
+                            active = [
+                                key
+                                for stage in run["config"].stages[: boundary + 1]
+                                for key in stage["workloads"]
+                            ]
+                            observed = self.decisions(run, active)
+                            self.check_decisions(observed, run["state_baseline"], active)
+                            run["state_baseline"].update(observed)
                         rows = self.operator.run["progress"][first:]
                         skipped = any(row["status"] == "skipped" for row in rows)
                         step["status"] = (
@@ -323,9 +406,12 @@ class PlanExecutor:
                 status=outcome,
                 steps=copy.deepcopy(run["steps"]),
             )
+            if "initial_assessment" in run:
+                self.operator.run["plan_result"]["initial_assessment"] = run["initial_assessment"]
             # No execution state, configuration snapshot, lease or confirmation survives.
             run["checkpoint"] = run["confirmed"] = None
             run["leases"].clear()
+            run["state_baseline"].clear()
             self.active = None
 
     def snapshot(self):
@@ -337,6 +423,6 @@ class PlanExecutor:
             {
                 key: value
                 for key, value in run.items()
-                if key not in ("config", "signal", "leases", "confirmed")
+                if key not in ("config", "signal", "leases", "confirmed", "state_baseline")
             }
         )

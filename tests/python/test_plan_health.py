@@ -1,6 +1,7 @@
 """Plan state stays separate from real systemd jobs and Docker observations."""
 
 from health_scenario import eventually
+from test_health_start import pytestmark as pytestmark
 
 from devdash.model import Config
 
@@ -13,6 +14,7 @@ def enable_plan(h):
 
 async def at_checkpoint(h):
     async def read():
+        assert h.engine.run["status"] != "failed", h.engine.run.get("error")
         value = h.engine.snapshot()["plan"]
         return value if value and value["checkpoint"] else None
 

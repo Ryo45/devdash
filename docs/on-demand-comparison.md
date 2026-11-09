@@ -1,5 +1,7 @@
 # Stage方式とOn-demand Plan方式の比較
 
+これは`ec834d5`時点の記録です。追加の現在状態Startupは[別レポート](start-missing-comparison.md)にまとめています。
+
 比較元は`feature/staged-startup`の **`b6cad2a`**（0.3.0.dev0 / Core IPC 2）。この実装は`feature/on-demand-operation-plans`（0.4.0.dev0 / Core IPC 3）です。main `d143e97`とStageブランチ、既存タグは変更せず、マージしません。[実装前の責務・寿命設計](on-demand-design.md)に沿った比較用の実装です。
 
 ## 実装と依存方向

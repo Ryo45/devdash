@@ -1,6 +1,6 @@
 # On-demand Plan版の常駐運用・比較起動・更新
 
-このブランチはCore/GUI `0.4.0.dev0`、Core IPC **3**です。ROS Bridgeは独立した`0.1.1` / IPC 1です。mainのCoordinator版IPC 1、Stage版IPC 2とは操作互換性がありません。既存ブランチ・タグは変更せず、比較用venv・設定・Socketを分けてください。
+このブランチはCore/GUI `0.4.0.dev1`、Core IPC **3**です。ROS Bridgeは独立した`0.1.1` / IPC 1です。mainのCoordinator版IPC 1、Stage版IPC 2とは操作互換性がありません。既存ブランチ・タグは変更せず、比較用venv・設定・Socketを分けてください。
 
 ## 導入と常駐Core
 
@@ -10,19 +10,19 @@
 uv sync --locked --extra gui --group dev --python /usr/bin/python3
 uv build --wheel
 uv export --locked --no-dev --extra gui --no-emit-project -o plan-requirements.txt
-uv venv --python /usr/bin/python3 "$HOME/.local/share/devdash-plan/current"
-uv pip install --python "$HOME/.local/share/devdash-plan/current/bin/python" \
+uv venv --python /usr/bin/python3 "$HOME/.local/share/devdash-missing/current"
+uv pip install --python "$HOME/.local/share/devdash-missing/current/bin/python" \
   --require-hashes -r plan-requirements.txt
-uv pip install --python "$HOME/.local/share/devdash-plan/current/bin/python" --no-deps \
-  dist/devdash_python-0.4.0.dev0-py3-none-any.whl
+uv pip install --python "$HOME/.local/share/devdash-missing/current/bin/python" --no-deps \
+  dist/devdash_python-0.4.0.dev1-py3-none-any.whl
 ```
 
-`devdash template core`はテンプレートを標準出力へ出すだけです。実行パスを上記venvへ、Socket / RuntimeDirectory / configを比較用へ置き換えて、**利用者が明示的に**`~/.config/systemd/user/devdash-plan-core.service`等へ保存してください。例では`RuntimeDirectory=devdash-plan`、`--socket "%t/devdash-plan/core.sock"`、`--config <生成出力>/current/devdash.yaml`を使います。
+`devdash template core`はテンプレートを標準出力へ出すだけです。実行パスを上記venvへ、Socket / RuntimeDirectory / configを比較用へ置き換えて、**利用者が明示的に**`~/.config/systemd/user/devdash-missing-core.service`等へ保存してください。例では`RuntimeDirectory=devdash-missing`、`--socket "%t/devdash-missing/core.sock"`、`--config <生成出力>/current/devdash.yaml`を使います。
 
 ```bash
 # 内容・パスをレビューして配置した後だけ
 systemctl --user daemon-reload
-systemctl --user enable --now devdash-plan-core.service
+systemctl --user enable --now devdash-missing-core.service
 # ログイン前から起動する場合だけ。devdashは設定しません。
 loginctl enable-linger "$USER"
 ```
@@ -34,8 +34,8 @@ CoreはGUI・デスクトップセッション・Approval状態ファイルを�
 `devdash template autostart`のvenvパスとSocketを比較用へ変更し、利用者がXDG Autostartへ明示配置します。GUI終了でCoreを止めません。GUIがCore未起動・再起動中でも待機・再接続し、通信断中はstale表示と操作無効化を行います。同じSocketのGUIは既定一つで、`--new-window`で明示的に複数にできます。
 
 ```bash
-"$HOME/.local/share/devdash-plan/current/bin/devdash-gui" \
-  --socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock"
+"$HOME/.local/share/devdash-missing/current/bin/devdash-gui" \
+  --socket "$XDG_RUNTIME_DIR/devdash-missing/core.sock"
 ```
 
 ## 更新・Rollback・設定再読込
@@ -51,10 +51,10 @@ PlanはCoreプロセス内の一回限りの実行です。GUI終了・切断中
 ## 問題の確認
 
 ```bash
-systemctl --user status devdash-plan-core.service
-journalctl --user -u devdash-plan-core.service -b
+systemctl --user status devdash-missing-core.service
+journalctl --user -u devdash-missing-core.service -b
 devdash --version
-devdash --socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock" status
+devdash --socket "$XDG_RUNTIME_DIR/devdash-missing/core.sock" status
 ```
 
 版、Socket、Core instance、managerの接続、Polkit理由、Docker socket権限、Inspection診断を確認します。Stageの失敗と現在のWorkload状態は別です。要求受付は完了ではなく、通信断で結果が不明な操作は自動再送しません。前段Activeは現在の機能的Healthを保証しません。

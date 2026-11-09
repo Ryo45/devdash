@@ -3,18 +3,28 @@
 import json
 import time
 
+import pytest
 from test_gui_lifecycle import CorePeer
+from test_gui_lifecycle import pytestmark as pytestmark
 
 
-def test_gui_plan_preview_checkpoints_repeat_abort_and_normal_operation(config, tmp_path):
+@pytest.mark.parametrize("kind", ["startup", "start_missing"])
+def test_gui_plan_preview_checkpoints_repeat_abort_and_normal_operation(config, tmp_path, kind):
     from devdash.gui import Window
-    from devdash.model import Config
+    from devdash.model import Config, observation
 
     raw = config.json()
     raw["stages"][0]["checks"] = ["Check camera images and IMU"]
     raw["stages"][1]["checks"] = ["Check perception output"]
-    raw["plan_templates"] = {"boot": {"kind": "startup"}}
+    raw["plan_templates"] = {"boot": {"kind": kind}}
     peer = CorePeer(Config(raw), tmp_path / "core.sock")
+
+    async def initial():
+        if kind == "start_missing":
+            peer.backend.observations["camera"] = observation(state="active")
+        await peer.engine.poll()
+
+    peer.run(initial())
     window = Window(peer.socket)
     errors = []
     window.report_callback_exception = lambda *args: errors.append(args)
@@ -46,7 +56,11 @@ def test_gui_plan_preview_checkpoints_repeat_abort_and_normal_operation(config, 
         click(window.plan_dialog.execute_button)
         wait(lambda: checkpoint("sensors"))
         first_id = window.snapshot["plan"]["id"]
-        assert peer.backend.calls == [("camera", "start"), ("imu", "start")]
+        assert peer.backend.calls == ([("camera", "start")] if kind == "startup" else []) + [
+            ("imu", "start")
+        ]
+        if kind == "start_missing":
+            assert "Actual decision: camera skip" in window.texts["Plan"].get("1.0", "end-1c")
         assert "Check camera" in window.texts["Plan"].get("1.0", "end-1c")
         assert "Remaining" in window.texts["Plan"].get("1.0", "end-1c")
         click(window.plan_continue)

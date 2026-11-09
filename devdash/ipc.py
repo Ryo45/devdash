@@ -113,6 +113,11 @@ class Server:
                 raise ValueError("Operation needs kind=stage or workload")
             engine.launch(value["target"], value["kind"] == "stage", value["action"])
         elif command == "plan_preview":
+            kind = value.get("kind") or engine.config.plan_templates.get(
+                value.get("template"), {}
+            ).get("kind")
+            if kind == "start_missing":
+                await engine.observer.poll()  # Read-only refresh; no lifecycle requests.
             return engine.plans.preview(
                 value.get("kind"), value.get("from_stage"), value.get("template")
             )

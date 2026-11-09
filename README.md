@@ -1,6 +1,6 @@
 # devdash — Observer / Operator / On-demand Plan
 
-`feature/on-demand-operation-plans`の **Python + ttkbootstrap / Tkinter**版です。比較元は`feature/staged-startup`の`b6cad2a`、Coordinator方式は`main`の`d143e97`に残しています。既存ブランチ・タグを変更せず、採用・マージは別途判断します。
+`feature/state-based-startup`の **Python + ttkbootstrap / Tkinter**版です。起点のOn-demand Plan方式は`feature/on-demand-operation-plans`の`ec834d5`、Stage方式は`b6cad2a`、Coordinator方式はmainの`d143e97`に残しています。既存ブランチ・タグを変更せず、採用・マージは別途判断します。
 
 **普段は自由な単発操作、必要なときだけ一回限りの複数操作Plan。** Workload / StageのStart・Stop・RestartはPlanなしで使えます。Startupや指定Stage以降のRestart・Stopは、プレビューしたPlanを明示実行します。Stageは操作単位と表示順であり、常駐Coordinatorや永続的な現在位置ではありません。
 
@@ -14,7 +14,7 @@ Ubuntu 22.04 / 24.04、Python 3.10以上を対象とします。検証環境はU
 
 ```bash
 uv sync --locked --extra gui --group dev --python /usr/bin/python3
-uv run devdash --version                 # 0.4.0.dev0 / Core IPC 3
+uv run devdash --version                 # 0.4.0.dev1 / Core IPC 3
 uv run devdash validate examples/robot.yaml
 ```
 
@@ -25,10 +25,10 @@ uvなしの場合は専用venvへ`pip install -e '.[gui]'`します。ROS環境�
 ```bash
 uv run devdash generate examples/robot.yaml ./generated-robot        # 一覧・差分・内容をプレビュー
 uv run devdash generate examples/robot.yaml ./generated-robot --write
-uv run devdash --socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock" \
+uv run devdash --socket "$XDG_RUNTIME_DIR/devdash-missing/core.sock" \
   daemon --config ./generated-robot/current/devdash.yaml
 # 別ターミナル
-uv run devdash-gui --socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock"
+uv run devdash-gui --socket "$XDG_RUNTIME_DIR/devdash-missing/core.sock"
 ```
 
 `examples/robot.yaml`のunit参照を実環境に合わせてください。明示依存のdrop-inをまだsystemdへ適用していない場合、該当StageのStartはInspectionで拒否します。生成結果をレビューして明示適用する手順は[設定手順](docs/stage-configuration.md)を参照してください。unit本体のExecStartやRestartポリシーは生成し直しません。
@@ -85,7 +85,7 @@ devdash check perception
 devdash logs detector
 ```
 
-比較用Socketを使う場合は各コマンドの先頭に`--socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock"`を付けてください。Stageメンバーは独立した要求として並列発行し、一部失敗しても発行済み結果をすべて追跡します。既にactiveなunitへのStartはsystemdに委譲し、不必要なRestartは発行しません。
+比較用Socketを使う場合は各コマンドの先頭に`--socket "$XDG_RUNTIME_DIR/devdash-missing/core.sock"`を付けてください。Stageメンバーは独立した要求として並列発行し、一部失敗しても発行済み結果をすべて追跡します。既にactiveなunitへのStartはsystemdに委譲し、不必要なRestartは発行しません。
 
 ### 必要なときだけPlanを使う
 
@@ -111,6 +111,28 @@ devdash plan templates
 - 終了・中止後にRun用の設定・Checkpoint・確認token・leaseを解放します。最後の結果要約は表示用だけです。確認は次のRunに継承せず、Core再起動でも復元しません。
 
 GUIを閉じてもCoreが生きていればPlanは継続します。中止後は発行済みジョブの結果を待ってから通常操作へ戻ります。実行中は単発・Stage・Child操作と共通の一枠を使用するため、競合要求は拒否します。未実行previewはCore内に最大8件だけ保持し、設定Reload・Core再起動で破棄します。
+
+### 現在状態から不足分だけ起動する
+
+GUIのPlan種類で`start_missing`を選びます。既存`startup`の意味・既定値は変更していません。
+
+```bash
+devdash plan preview start_missing
+devdash plan preview --template recover_current    # examples/robot.yaml
+devdash plan execute PREVIEW_ID
+devdash status
+devdash plan continue RUN_ID TOKEN
+```
+
+PreviewにWorkloadごとのStart / Skip / Blockと理由を表示します。Execute時、各StageのInspection後の発行直前、Startジョブ完了後に再観測します。予想と実際の判断・Adapter結果はPlanタブで別々に確認できます。
+
+- Inactive / FailedはStart、現在Activeかつ既存のReady/Health条件を満たす対象はSkip。Start/Restart要求を省略します。
+- Health未提供はUnhealthyと区別します。通常systemdサービスがReady契約を提供しない場合はActiveでSkipできますが、画像やROS品質が正常とは推定しません。設定されたDocker/HTTP契約やsystemd情報取得が不明ならBlockです。
+- 操作前後の再確認でUnhealthy / Not Ready / Unknown / Stale / 遷移中なら、自動判断を保留してRunを終了します。Checkpoint中に変化した場合は古いContinueと不健全状態での進行を拒否し、再観測・再確認または明示Abortを求めます。BlockedだったPreviewは、解消後に新しく作り直してください。正常Activeへの変化はStart→Skipへ減らせますが、Activeだった対象の停止・世代変更は勝手に起動し直しません。
+- 全メンバーSkipでもchecksのCheckpointを残します。新しいRunの確認は毎回必要です。空checksでも不健全・不明を通過せず、Start後のReady待ちポーリングは追加しません。
+- 起動失敗後は成功済みWorkloadを維持してRunを終了します。修正後の新しいPreview/Runは現在状態だけで組み直し、過去のRunや承認を参照しません。自動reset-failed・再試行・復旧はしません。
+
+[現在状態Startupの設計](docs/start-missing-design.md)と[比較・実環境検証レポート](docs/start-missing-comparison.md)を参照してください。
 
 GUI終了・Core終了はWorkload停止ではありません。Core復旧時は新しい観測基準を取得し、過去の操作は再実行・成功推定しません。通信断はstaleとして表示し、GUI操作を無効にして復旧を待ちます。Core/GUIの版・接続・互換性も表示します。
 

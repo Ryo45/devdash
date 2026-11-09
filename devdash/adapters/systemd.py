@@ -512,10 +512,12 @@ class Systemd:
             raise
         if props.get("LoadState") == "not-found":
             return observation(state="not_found", manager_generation=session.generation)
+        service_error = None
         try:
             service = await session.properties(path, SERVICE + ".Service")
-        except (BusError, TimeoutError):
+        except (BusError, TimeoutError) as error:
             service = {}
+            service_error = str(error) or type(error).__name__
         session.check()
         invocation = bytes(props.get("InvocationID", [])).hex()
 
@@ -532,6 +534,10 @@ class Systemd:
             cpu_nsec=valid(service.get("CPUUsageNSec")),
             memory_bytes=valid(service.get("MemoryCurrent")),
             readiness=readiness(
+                source="systemd service", detail="Service properties unavailable: " + service_error
+            )
+            if service_error
+            else readiness(
                 "ready" if props.get("ActiveState") == "active" else "not_ready",
                 "systemd notify",
                 "Type=" + service["Type"] + "; manager startup completion, not continuous health",
