@@ -33,7 +33,8 @@ stages:
   workloads:
   - detector
   description: ''
-  checks: []
+  checks:
+  - Verify perception output before starting Control
 - id: control
   name: Control
   workloads:
@@ -46,3 +47,14 @@ dependencies:
   - imu
   planner:
   - detector
+plan_templates:
+  first_start:
+    name: Initial staged startup
+    kind: startup
+  restart_perception:
+    name: Restart Perception and Control
+    kind: restart_from
+    from_stage: perception
+  stop_robot:
+    kind: stop_from
+    from_stage: sensors

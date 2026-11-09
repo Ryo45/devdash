@@ -157,7 +157,7 @@ def test_gui_reconnect_versions_and_close_does_not_own_stage_operation(
         peer.run(peer.metadata(protocol=1))
         wait(lambda: not window.connected)
         assert "Incompatible Core IPC" in window.status.cget("text")
-        peer.run(peer.metadata(protocol=2, version=__version__))
+        peer.run(peer.metadata(protocol=3, version=__version__))
         wait(lambda: window.connected)
         start()
         window.close()

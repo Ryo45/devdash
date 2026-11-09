@@ -1,12 +1,12 @@
-# devdash — Stage方式の比較実装
+# devdash — Observer / Operator / On-demand Plan
 
-`feature/staged-startup`ブランチの **Python + ttkbootstrap / Tkinter**版です。比較元のCoordinator方式は`main`の`d143e97`に残っています。このブランチをmainへマージする判断はまだしていません。
+`feature/on-demand-operation-plans`の **Python + ttkbootstrap / Tkinter**版です。比較元は`feature/staged-startup`の`b6cad2a`、Coordinator方式は`main`の`d143e97`に残しています。既存ブランチ・タグを変更せず、採用・マージは別途判断します。
 
-Stageは開発者が明示操作する順序付きリストです。選択StageのWorkloadだけにStart/Stop/Restartを要求し、結果を追跡します。後続Stageは自動起動しません。Nextは「選択Stageの次へのStart要求」で、承認ラッチや永続的な現在位置ではありません。
+**普段は自由な単発操作、必要なときだけ一回限りの複数操作Plan。** Workload / StageのStart・Stop・RestartはPlanなしで使えます。Startupや指定Stage以降のRestart・Stopは、プレビューしたPlanを明示実行します。Stageは操作単位と表示順であり、常駐Coordinatorや永続的な現在位置ではありません。
 
 実行管理・必須依存・起動Readyはsystemd / Docker / Supervisor / ROS 2 launchが所有します。devdashはSupervisor、自動復旧、依存DAG実行、独自のReady待機を実装しません。Execution、現在のHealth/Readiness、操作結果は別々に表示します。
 
-[比較レポート](docs/stage-comparison.md)／[生成・移行・適用手順](docs/stage-configuration.md)／[常駐運用](docs/resident-operation.md)
+[設計と状態の寿命](docs/on-demand-design.md)／[Stage方式との比較](docs/on-demand-comparison.md)／[生成・移行・適用手順](docs/stage-configuration.md)／[常駐運用](docs/resident-operation.md)
 
 ## セットアップと比較実行
 
@@ -14,26 +14,26 @@ Ubuntu 22.04 / 24.04、Python 3.10以上を対象とします。検証環境はU
 
 ```bash
 uv sync --locked --extra gui --group dev --python /usr/bin/python3
-uv run devdash --version                 # 0.3.0.dev0 / Core IPC 2
+uv run devdash --version                 # 0.4.0.dev0 / Core IPC 3
 uv run devdash validate examples/robot.yaml
 ```
 
 uvなしの場合は専用venvへ`pip install -e '.[gui]'`します。ROS環境とCore/GUIのvenvは分離します。Bridgeは独立した0.1.1 / IPC 1のままです。
 
-比較中は既存main版CoreとSocket・venvを分けてください。以下は生成だけで、systemd設定の適用やサービス起動は行いません。
+比較中はmain版・Stage版CoreとSocket・venvを分けてください。Generatorは任意の支援機能で、通常のYAMLを直接Coreへ渡しても利用できます。以下の生成コマンドはsystemd設定の適用やサービス起動を行いません。
 
 ```bash
 uv run devdash generate examples/robot.yaml ./generated-robot        # 一覧・差分・内容をプレビュー
 uv run devdash generate examples/robot.yaml ./generated-robot --write
-uv run devdash --socket "$XDG_RUNTIME_DIR/devdash-stage/core.sock" \
+uv run devdash --socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock" \
   daemon --config ./generated-robot/current/devdash.yaml
 # 別ターミナル
-uv run devdash-gui --socket "$XDG_RUNTIME_DIR/devdash-stage/core.sock"
+uv run devdash-gui --socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock"
 ```
 
 `examples/robot.yaml`のunit参照を実環境に合わせてください。明示依存のdrop-inをまだsystemdへ適用していない場合、該当StageのStartはInspectionで拒否します。生成結果をレビューして明示適用する手順は[設定手順](docs/stage-configuration.md)を参照してください。unit本体のExecStartやRestartポリシーは生成し直しません。
 
-旧Core/GUIとはIPCが非互換です。旧クライアントがStage版Coreへ操作を強行することはありません。既存のリリースタグは変更しません。
+旧Core/GUIとはIPCが非互換です。世代1・2のクライアントは操作前に拒否します。ROS Bridgeは独立したIPC 1を維持し、Core更新だけを理由にBridgeを更新する必要はありません。
 
 ## 設定と責務
 
@@ -85,7 +85,32 @@ devdash check perception
 devdash logs detector
 ```
 
-比較用Socketを使う場合は各コマンドの先頭に`--socket "$XDG_RUNTIME_DIR/devdash-stage/core.sock"`を付けてください。Stageメンバーは独立した要求として並列発行し、一部失敗しても発行済み結果をすべて追跡します。既にactiveなunitへのStartはsystemdに委譲し、不必要なRestartは発行しません。全体停止は必要なStageを逆順で明示Stopしてください。
+比較用Socketを使う場合は各コマンドの先頭に`--socket "$XDG_RUNTIME_DIR/devdash-plan/core.sock"`を付けてください。Stageメンバーは独立した要求として並列発行し、一部失敗しても発行済み結果をすべて追跡します。既にactiveなunitへのStartはsystemdに委譲し、不必要なRestartは発行しません。
+
+### 必要なときだけPlanを使う
+
+GUIの通常操作ボタンはそのまま使えます。複数操作にはOn-demand Planを選び、**Preview Plan → 対象・順序を確認 → Execute**と進めます。実行中はPlanタブに完了・失敗・残りの操作とCheckpointの観測状態を表示します。
+
+```bash
+devdash plan preview startup
+devdash plan preview restart_from --from-stage perception
+devdash plan preview stop_from --from-stage perception
+devdash plan preview --template first_start
+devdash plan execute PREVIEW_ID          # 使い切り。previewだけでは操作しない
+devdash status                          # Run ID / 現在のCheckpoint token / 実ジョブ結果
+devdash plan continue RUN_ID TOKEN       # そのRunの、その表示状態にだけ有効
+devdash plan cancel RUN_ID               # 未発行を中止し、発行済みジョブは追跡
+devdash plan templates
+```
+
+- Startupは全Stageを正順Start、Restart fromは指定Stage以降を逆順Stop→正順Start、Stop fromは逆順Stopです。
+- 最終Stage以外のStart後に`checks`があればCheckpointで待ちます。空なら待たず次へ進み、最後には追加のCheckpointを置きません。プレビューで全手順を確認してください。
+- `plan_templates: {first_start: {kind: startup}}`のように静的手順を保存できます。ループ・条件式・任意コマンドはありません。実行時に設定をコピーし、実行中Reloadは拒否します。
+- Continue直前に再観測します。起動世代・Health・内部Controller世代・取得不能状態が変わったら古いtokenを拒否し、表示を更新して再確認を求めます。不明は不明と表示し、人間の確認を必須Readyの代用にはしません。
+- 関係するmanager接続を失ったRunは失敗し、自動再開しません。外部操作や複数起動世代が実行要求に混ざった場合も、実ジョブ結果を残したうえで操作文脈を不確実として扱います。
+- 終了・中止後にRun用の設定・Checkpoint・確認token・leaseを解放します。最後の結果要約は表示用だけです。確認は次のRunに継承せず、Core再起動でも復元しません。
+
+GUIを閉じてもCoreが生きていればPlanは継続します。中止後は発行済みジョブの結果を待ってから通常操作へ戻ります。実行中は単発・Stage・Child操作と共通の一枠を使用するため、競合要求は拒否します。未実行previewはCore内に最大8件だけ保持し、設定Reload・Core再起動で破棄します。
 
 GUI終了・Core終了はWorkload停止ではありません。Core復旧時は新しい観測基準を取得し、過去の操作は再実行・成功推定しません。通信断はstaleとして表示し、GUI操作を無効にして復旧を待ちます。Core/GUIの版・接続・互換性も表示します。
 
@@ -141,4 +166,4 @@ docker build -t devdash-supervisor-test:4.3.0 tests/fixtures/supervisor
 
 テストは一意な`devdash-py-it-*` user unitと専用コンテナだけを操作し、既存サービスやlingerを変更しません。system managerの実テストは読み取りのみで、認可拒否は疑似D-Busでも検証します。ROSの実環境固有テストは従来の`tools/run_roslaunch_tests.py`を利用します。
 
-旧テストの対応・削除した状態管理・9シナリオの操作比較・既知の制限は[比較レポート](docs/stage-comparison.md)にまとめています。MIT / Apache-2.0、GUIは引き続きttkbootstrap / Tkinterです。Rust + GPUI版は`archive/rust-gpui`に保存しています。
+Stage版から増減した状態・操作比較・検証結果・既知の制限は[今回の比較レポート](docs/on-demand-comparison.md)を参照してください。[Coordinator→Stage比較](docs/stage-comparison.md)は比較元の記録です。MIT / Apache-2.0、GUIは引き続きttkbootstrap / Tkinterです。Rust + GPUI版は`archive/rust-gpui`に保存しています。

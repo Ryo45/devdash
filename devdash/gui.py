@@ -17,7 +17,7 @@ import ttkbootstrap as ttk
 
 from . import __version__
 from .ipc import OutcomeUnknown, default_socket, request
-from .presentation import stage_progress, workload_summary
+from .presentation import plan_progress, stage_progress, workload_summary
 from .protocol import MUTATIONS, CompatibilityError, check_core
 
 
@@ -98,7 +98,7 @@ class Window(ttk.Window):
         self.next_button.pack(side="left", padx=(0, 5))
         self.cancel = ttk.Button(
             operations,
-            text="Cancel",
+            text="Cancel unissued",
             bootstyle="warning",
             command=lambda: self.send({"command": "cancel"}, self.render),
         )
@@ -113,6 +113,29 @@ class Window(ttk.Window):
             text="Reload Core config (no lifecycle)",
             command=lambda: self.send({"command": "reload"}, self.render),
         ).pack(side="left", padx=5)
+        plan_controls = ttk.Frame(right)
+        plan_controls.pack(fill="x", pady=(6, 0))
+        ttk.Label(plan_controls, text="On-demand Plan: ").pack(side="left")
+        self.plan_kind = ttk.Combobox(
+            plan_controls,
+            values=("startup", "restart_from", "stop_from"),
+            state="readonly",
+            width=18,
+        )
+        self.plan_kind.set("startup")
+        self.plan_kind.pack(side="left")
+        self.plan_preview_button = ttk.Button(
+            plan_controls, text="Preview Plan", command=self.preview_plan
+        )
+        self.plan_preview_button.pack(side="left", padx=4)
+        self.plan_continue = ttk.Button(
+            plan_controls, text="Continue Checkpoint", command=self.continue_plan
+        )
+        self.plan_continue.pack(side="left", padx=4)
+        self.plan_abort = ttk.Button(
+            plan_controls, text="Abort Plan (no rollback)", command=self.abort_plan
+        )
+        self.plan_abort.pack(side="left")
         self.summary = ttk.Label(right, text="", wraplength=730, justify="left")
         self.summary.pack(fill="x", pady=(10, 0))
         self.run = ttk.Label(right, text="", wraplength=730)
@@ -120,7 +143,7 @@ class Window(ttk.Window):
         self.tabs = ttk.Notebook(right)
         self.tabs.pack(fill="both", expand=True)
         self.texts = {}
-        for key in ("Details", "Progress", "Diagnostics", "Events", "Logs"):
+        for key in ("Details", "Progress", "Plan", "Diagnostics", "Events", "Logs"):
             frame = ttk.Frame(self.tabs)
             text = ScrolledText(
                 frame,
@@ -168,6 +191,11 @@ class Window(ttk.Window):
             values = self.tree.item(iid, "values")
             if values and values[0] and not values[0].endswith(" (stale)"):
                 self.tree.item(iid, values=(values[0] + " (stale)", "unknown (stale)"))
+        if self.snapshot:
+            set_text(
+                self.texts["Plan"],
+                "STALE: Core disconnected; Plan outcome unknown\n" + plan_progress(self.snapshot),
+            )
         self.selected()
 
     def tick(self):
@@ -261,8 +289,8 @@ class Window(ttk.Window):
                 parent,
                 f"{label} [{scope}]",
                 ["workload", key],
-                obs.get("state", "unknown"),
-                obs.get("readiness", {}).get("state", "unknown"),
+                obs.get("state", "unknown") + (" (stale)" if obs.get("stale") else ""),
+                "unknown" if obs.get("stale") else obs.get("readiness", {}).get("state", "unknown"),
             )
             child_items = {}
             for child in obs.get("children", []):
@@ -325,6 +353,16 @@ class Window(ttk.Window):
                 ensure_ascii=False,
             ),
         )
+        set_text(self.texts["Plan"], plan_progress(value))
+        choices = (
+            "startup",
+            "restart_from",
+            "stop_from",
+            *["template:" + key for key in config.get("plan_templates", {})],
+        )
+        self.plan_kind.configure(values=choices)
+        if self.plan_kind.get() not in choices:
+            self.plan_kind.set("startup")
         self.selected()
 
     def selected(self, event=None):
@@ -398,11 +436,27 @@ class Window(ttk.Window):
             else "No Next Stage",
             state="normal" if self.connected and not busy and following else "disabled",
         )
+        plan = value.get("plan") if value else None
         self.cancel.configure(
             state="normal"
-            if self.connected and busy and value["run"]["status"] != "cancelling"
+            if self.connected and busy and not plan and value["run"]["status"] != "cancelling"
             else "disabled"
         )
+        checkpoint = plan.get("checkpoint") if plan else None
+        self.plan_continue.configure(
+            text="Continue (observations unknown)"
+            if checkpoint and checkpoint["unknown"]
+            else "Continue Checkpoint",
+            state="normal"
+            if self.connected and checkpoint and value["run"]["status"] != "cancelling"
+            else "disabled",
+        )
+        self.plan_abort.configure(
+            state="normal"
+            if self.connected and plan and value["run"]["status"] != "cancelling"
+            else "disabled"
+        )
+        self.plan_preview_button.configure(state="normal" if self.connected else "disabled")
 
         self.scan_button.configure(state="normal" if self.connected else "disabled")
 
@@ -416,6 +470,33 @@ class Window(ttk.Window):
                 command="child", parent=key, child=extra[0], epoch=extra[1], action=action
             )
         self.send(command, self.render)
+
+    def preview_plan(self):
+        choice = self.plan_kind.get()
+        command = dict(command="plan_preview")
+        if choice.startswith("template:"):
+            command["template"] = choice.removeprefix("template:")
+        else:
+            command["kind"] = choice
+            if choice != "startup":
+                if not self.selection or self.selection[0] != "stage":
+                    self.error.configure(text="Select the first Stage of the requested suffix")
+                    return
+                command["from_stage"] = self.selection[1]
+        self.send(command, lambda value: PlanDialog(self, value))
+
+    def continue_plan(self):
+        plan = self.snapshot.get("plan")
+        if plan and plan.get("checkpoint"):
+            self.send(
+                dict(command="plan_continue", run_id=plan["id"], token=plan["checkpoint"]["token"]),
+                self.render,
+            )
+
+    def abort_plan(self):
+        plan = self.snapshot.get("plan")
+        if plan:
+            self.send(dict(command="plan_cancel", run_id=plan["id"]), self.render)
 
     def next_stage(self):
         if self.selection and self.selection[0] == "stage":
@@ -460,6 +541,42 @@ class Window(ttk.Window):
             self.after_cancel(self.timer)
         self.pool.shutdown(wait=False, cancel_futures=True)
         self.destroy()
+
+
+class PlanDialog(ttk.Toplevel):
+    """Preview is inert; Execute is a separate explicit request."""
+
+    def __init__(self, owner, preview):
+        super().__init__(title="Plan preview — no operations issued", size=(760, 600))
+        self.owner, self.preview = owner, preview
+        text = ScrolledText(self, wrap="word")
+        text.pack(fill="both", expand=True, padx=10, pady=10)
+        text.insert("1.0", json.dumps(preview, indent=2, ensure_ascii=False))
+        text.configure(state="disabled")
+        self.execute_button = ttk.Button(
+            self, text="Execute this one-time Plan", command=self.execute
+        )
+        self.execute_button.pack(fill="x", padx=10, pady=8)
+        ttk.Button(self, text="Close preview (no effect)", command=self.destroy).pack(
+            fill="x", padx=10, pady=8
+        )
+        owner.plan_dialog = self
+
+    def execute(self):
+        if not self.owner.connected or self.owner.snapshot["run"]["status"] in (
+            "running",
+            "cancelling",
+        ):
+            self.owner.error.configure(text="Another operation is running or Core is unavailable")
+            return
+
+        def accepted(value):
+            self.owner.render(value)
+            self.owner.tabs.select(list(self.owner.texts).index("Plan"))
+            if self.winfo_exists():
+                self.destroy()
+
+        self.owner.send(dict(command="plan_execute", preview_id=self.preview["id"]), accepted)
 
 
 @contextmanager

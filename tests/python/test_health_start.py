@@ -149,8 +149,11 @@ async def test_external_stop_or_restart_during_pending_start(health_scenario, ex
         run = await h.done()
         await h.record("external-restart")
         assert (await h.observe("next"))["state"] == "inactive"
-        assert run["status"] in ("completed", "failed")
-        assert h.jobs() == (["done"] if run["status"] == "completed" else ["canceled"])
+        assert run["status"] == "failed"
+        # A merged Start can be 'done' despite an intervening generation. Its
+        # real result is kept, while the requested operation context is uncertain.
+        assert h.jobs() in (["done"], ["canceled"])
+        assert "uncertain" in run["error"] or "canceled" in run["error"]
     else:
         run = await h.done()
         assert run["status"] == "failed" and "job result canceled" in run["error"]

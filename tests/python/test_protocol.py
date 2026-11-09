@@ -3,9 +3,9 @@
 import asyncio
 
 import pytest
-from dbus_fast import Message, MessageFlag, MessageType
+from dbus_fast import Message, MessageFlag, MessageType, Variant
 
-from devdash.adapters.systemd import MANAGER, PATH, SERVICE, BusError, Session
+from devdash.adapters.systemd import MANAGER, PATH, PROPERTIES_INTERFACE, SERVICE, BusError, Session
 
 
 class Backend:
@@ -20,7 +20,8 @@ class Backend:
         )()
 
     def event(self, *args, **kwargs):
-        self.events.append((args, kwargs))
+        if args[1] != "operation_prepared":  # This fixture asserts completion correlation only.
+            self.events.append((args, kwargs))
 
 
 def removed(session, path, result="done", sender=":1.42"):
@@ -162,3 +163,34 @@ async def test_overflow_marks_tracking_unknown_without_silently_losing_owned_job
         await wait
     assert "/job/owned" in session.jobs
     assert len(session.early) == 256
+
+
+def test_invocation_signals_are_owner_pinned_deduplicated_and_not_job_results():
+    backend = Backend()
+    session = Session(backend, "user", 1)
+    session.owner = ":1.42"
+    path = PATH + "/unit/a_2eservice"
+    session.unit_paths[path] = "a.service"
+
+    def changed(value, sender=":1.42"):
+        session.message(
+            Message(
+                message_type=MessageType.SIGNAL,
+                sender=sender,
+                path=path,
+                interface=PROPERTIES_INTERFACE,
+                member="PropertiesChanged",
+                signature="sa{sv}as",
+                body=[SERVICE + ".Unit", {"InvocationID": Variant("ay", bytes([value]) * 16)}, []],
+            )
+        )
+
+    changed(1, sender=":1.99")
+    assert not backend.events
+    changed(1)
+    changed(1)
+    changed(0)  # No running generation: not a new invocation.
+    changed(2)
+    assert [args[1] for args, _ in backend.events] == ["invocation_changed"] * 2
+    assert [facts["invocation_id"] for _, facts in backend.events] == ["01" * 16, "02" * 16]
+    assert not session.jobs and not session.early and not session.issuing

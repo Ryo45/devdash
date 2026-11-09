@@ -53,6 +53,8 @@ class Session:
         self.aliases: dict[str, str] = {}
         self.recent: dict[str, float] = {}
         self.metadata: dict[str, float] = {}
+        self.unit_paths = {}
+        self.invocations = {}
         self.reloading = False
         self.disconnect_task = None
 
@@ -75,6 +77,7 @@ class Session:
         self.bus.add_message_handler(self.message)
         for rule in (
             f"type='signal',sender='{self.owner}',interface='{MANAGER}',path='{PATH}'",
+            f"type='signal',sender='{self.owner}',interface='{PROPERTIES_INTERFACE}',path_namespace='{PATH}/unit'",
             f"type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='{SERVICE}'",
         ):
             await self.call(
@@ -202,6 +205,10 @@ class Session:
         path = (await self.call("LoadUnit", "s", [name]))[0]
         properties = await self.properties(path, SERVICE + ".Unit")
         self.aliases[name] = properties.get("Id", name)
+        self.unit_paths[path] = properties.get("Id", name)
+        self.invocations.setdefault(
+            properties.get("Id", name), bytes(properties.get("InvocationID", [])).hex()
+        )
         return path, properties
 
     def workload(self, unit):
@@ -241,7 +248,29 @@ class Session:
             if name == SERVICE and old == self.owner and old != new:
                 self.fail("manager name owner changed")
             return None
-        if self.lost.is_set() or message.sender != self.owner or message.interface != MANAGER:
+        if self.lost.is_set() or message.sender != self.owner:
+            return None
+        if message.interface == PROPERTIES_INTERFACE and message.member == "PropertiesChanged":
+            try:
+                interface, changed, _ = message.body
+                unit = self.unit_paths.get(message.path)
+                if unit and interface == SERVICE + ".Unit" and "InvocationID" in changed:
+                    value = bytes(unpack(changed["InvocationID"])).hex()
+                    previous = self.invocations.get(unit)
+                    self.invocations[unit] = value
+                    if value != previous and value and any(bytes.fromhex(value)):
+                        self.backend.event(
+                            self.scope,
+                            "invocation_changed",
+                            "Observed systemd invocation generation changed; origin unconfirmed",
+                            unit=unit,
+                            invocation_id=value,
+                            previous_invocation=previous,
+                        )
+            except Exception as error:
+                self.fail(f"Invalid unit generation event: {error}")
+            return None
+        if message.interface != MANAGER:
             return None
         try:
             if message.member == "JobRemoved":
@@ -303,6 +332,15 @@ class Session:
         self.check()
         if cancel is not None and cancel.is_set():
             return False  # No lifecycle D-Bus call has been issued yet.
+        self.backend.event(
+            self.scope,
+            "operation_prepared",
+            "Lifecycle metadata resolved; no result implied",
+            unit=unit,
+            action=action,
+            active_state=properties.get("ActiveState"),
+            invocation_id=bytes(properties.get("InvocationID", [])).hex(),
+        )
         self.issuing[unit] = self.issuing.get(unit, 0) + 1
         path = None
         reply_known = False

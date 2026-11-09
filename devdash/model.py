@@ -102,10 +102,13 @@ class Config:
     def __init__(self, raw: dict):
         if isinstance(raw, dict) and ("groups" in raw or "gates" in raw):
             raise ConfigError("Legacy Coordinator config: use devdash migrate to propose Stages")
-        raw = copy.deepcopy(fields(raw, {"workloads", "stages", "dependencies"}, "config"))
+        raw = copy.deepcopy(
+            fields(raw, {"workloads", "stages", "dependencies", "plan_templates"}, "config")
+        )
         self.workloads = raw.get("workloads", {})
         self.stages = raw.get("stages", [])
         self.dependencies = raw.get("dependencies", {})
+        self.plan_templates = raw.get("plan_templates", {})
         require(isinstance(self.workloads, dict), "workloads must be a mapping")
         require(all(isinstance(key, str) and key for key in self.workloads), "Invalid Workload ID")
         references = set()
@@ -266,6 +269,20 @@ class Config:
                     f"Prerequisite {prerequisite} must be in an earlier Stage than {key}; same/reverse Stage dependency unsupported",
                 )
 
+        require(isinstance(self.plan_templates, dict), "plan_templates must be a mapping")
+        for key, template in self.plan_templates.items():
+            require(isinstance(key, str) and key, "Invalid Plan Template ID")
+            fields(template, {"kind", "from_stage", "name"}, "Plan Template")
+            require(
+                template.get("kind") in ("startup", "restart_from", "stop_from"),
+                "Unknown Plan Template kind",
+            )
+            require(isinstance(template.get("name", key), str), "Invalid Template name")
+            if template["kind"] == "startup":
+                require("from_stage" not in template, "Startup Template uses all Stages")
+            else:
+                self.stage(template.get("from_stage"))
+
     def stage(self, key):
         result = next((stage for stage in self.stages if stage["id"] == key), None)
         require(result is not None, f"Unknown Stage: {key}")
@@ -286,7 +303,12 @@ class Config:
 
     def json(self) -> dict:
         return copy.deepcopy(
-            dict(workloads=self.workloads, stages=self.stages, dependencies=self.dependencies)
+            dict(
+                workloads=self.workloads,
+                stages=self.stages,
+                dependencies=self.dependencies,
+                plan_templates=self.plan_templates,
+            )
         )
 
     def import_unit(self, unit: str, scope: str) -> str:

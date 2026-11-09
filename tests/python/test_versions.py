@@ -34,7 +34,7 @@ def test_core_and_gui_version_comes_from_package_metadata():
     assert __version__ == version("devdash-python")
 
 
-@pytest.mark.parametrize("protocol", [None, 0, 1, True, "2"])
+@pytest.mark.parametrize("protocol", [None, 0, 1, 2, True, "3"])
 async def test_incompatible_raw_client_never_dispatches_operation(core_endpoint, backend, protocol):
     engine, server, socket = core_endpoint
     reader, writer = await asyncio.open_unix_connection(str(socket))
@@ -72,7 +72,7 @@ async def test_stale_gui_core_instance_is_rejected_before_any_mutation(
     assert not engine.busy and not backend.calls
 
 
-@pytest.mark.parametrize("protocol", [None, 1])
+@pytest.mark.parametrize("protocol", [None, 1, 2])
 async def test_legacy_or_incompatible_core_only_receives_readonly_handshake(tmp_path, protocol):
     socket = tmp_path / "legacy.sock"
     received = []

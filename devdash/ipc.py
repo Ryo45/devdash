@@ -112,6 +112,18 @@ class Server:
             if value.get("kind") not in ("stage", "workload"):
                 raise ValueError("Operation needs kind=stage or workload")
             engine.launch(value["target"], value["kind"] == "stage", value["action"])
+        elif command == "plan_preview":
+            return engine.plans.preview(
+                value.get("kind"), value.get("from_stage"), value.get("template")
+            )
+        elif command == "plan_templates":
+            return engine.config.plan_templates
+        elif command == "plan_execute":
+            engine.plans.start(value["preview_id"])
+        elif command == "plan_continue":
+            await engine.plans.continue_run(value["run_id"], value["token"])
+        elif command == "plan_cancel":
+            engine.plans.cancel(value["run_id"])
         elif command == "next":
             engine.launch_next(value["after"])
         elif command == "child":
@@ -165,9 +177,13 @@ class Server:
         self.engine.backend.systemd.config = candidate
         self.engine.observations.clear()
         self.engine.known.clear()
+        self.engine.observer.internal_known.clear()
+        self.engine.observer.observed_at = 0.0
         self.engine.outages.clear()
         self.engine.reports.clear()
+        self.engine.run.clear()
         self.engine.run.update(target="", kind="", action="", status="", progress=[], error=None)
+        self.engine.plans.previews.clear()
         self.engine.invalidate()
         self.engine.emit(
             "info",

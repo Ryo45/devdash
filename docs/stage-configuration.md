@@ -2,6 +2,8 @@
 
 編集元とRuntimeは同じ検証モデル（Workloads / Stages / dependencies）を使います。別形式の互換Coordinatorや汎用プラグインはありません。`model.py`はGUIやsystemd接続に依存しません。
 
+On-demand Plan版でもこの形式とGeneratorを維持します。Generatorは任意であり、生成世代を持たないYAMLでもOperator/Planを利用できます。任意の`plan_templates`は静的定義として保存・生成時に保持します（例：`boot: {kind: startup}`）。TemplateはYAMLで編集します。EditorのStage `checks`は単発操作では確認事項の表示、Planでは最終Stage以外のStart後のCheckpointに使います。空ならCheckpointはありません。Stage版の既存YAMLはそのまま利用でき、Plan用に`checks`をレビューするだけです。
+
 ## 編集モデル
 
 Workloadは既存unitまたはコンテナの参照です。既存のLifecycle / Observer / Child Controller設定を維持します。ExecStart、Restart、環境変数、WorkingDirectory等は既存のGit管理unitに残します。

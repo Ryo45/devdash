@@ -24,7 +24,7 @@ async def snapshot_when(socket, predicate):
 
 
 @pytest.mark.parametrize("core_signal", [signal.SIGTERM, signal.SIGKILL])
-@pytest.mark.parametrize("stage", ["idle", "job"])
+@pytest.mark.parametrize("stage", ["idle", "job", "checkpoint", "plan_job"])
 async def test_core_restart_observes_without_start_replay_or_stop(
     tmp_path, monkeypatch, core_signal, stage
 ):
@@ -35,7 +35,9 @@ async def test_core_restart_observes_without_start_replay_or_stop(
         manager = harness.managers["user"]
         manager.active["same.service"] = True  # Already running before devdash.
         config = tmp_path / "config.yaml"
-        config.write_text(yaml.safe_dump(harness.engine.config.json()))
+        source = harness.engine.config.json()
+        source["stages"][0]["checks"] = ["Check the actual device"]
+        config.write_text(yaml.safe_dump(source))
         socket = tmp_path / "private/core.sock"
         environment = dict(
             os.environ,
@@ -69,20 +71,28 @@ async def test_core_restart_observes_without_start_replay_or_stop(
             socket, lambda value: value["observations"].get("probe", {}).get("state") == "active"
         )
         assert initial["run"]["status"] == "" and manager.calls == []
-        if stage == "job":
+        if stage in ("job", "plan_job"):
             manager.hold_job = True
-        accepted = await request(
-            socket, dict(command="operate", target="robot", kind="stage", action="start")
-        )
+        if stage in ("checkpoint", "plan_job"):
+            preview = await request(socket, dict(command="plan_preview", kind="startup"))
+            accepted = await request(socket, dict(command="plan_execute", preview_id=preview["id"]))
+        else:
+            accepted = await request(
+                socket, dict(command="operate", target="robot", kind="stage", action="start")
+            )
         assert accepted["run"]["status"] in ("running", "cancelling")
         before = await snapshot_when(
             socket,
             lambda value: (
-                value["run"]["status"] == "completed" if stage == "idle" else bool(manager.calls)
+                value["run"]["status"] == "completed"
+                if stage == "idle"
+                else bool((value.get("plan") or {}).get("checkpoint"))
+                if stage == "checkpoint"
+                else bool(manager.calls)
             ),
         )
         assert before["run"]["status"] == (
-            "running" if stage == "job" else "completed"
+            "completed" if stage == "idle" else "running"
         )  # Accepted never means succeeded.
         assert manager.calls == [("StartUnit", "same.service")]
         process.send_signal(core_signal)
@@ -95,6 +105,7 @@ async def test_core_restart_observes_without_start_replay_or_stop(
         )
         assert restored["core"]["instance"] != initial["core"]["instance"]
         assert restored["run"]["status"] == "" and restored["run"]["progress"] == []
+        assert restored["plan"] is None
         assert "approved" not in restored and "waiting_gate" not in restored["run"]
         assert manager.calls == calls  # No resume, stop, restart, or repair.
         assert harness.managers["system"].calls == []

@@ -1,5 +1,7 @@
 """Plain display text for observed facts and sequence progress; no Tk dependency."""
 
+import json
+
 from .model import Config, docker_reference
 
 
@@ -49,8 +51,10 @@ def workload_summary(work, observed, connected=True):
         if error := observed.get(field):
             if error not in lines:
                 lines.append(error)
-    if not connected:
-        lines.insert(0, "STALE: Core disconnected; current execution, health and readiness unknown")
+    if not connected or observed.get("stale"):
+        lines.insert(
+            0, "STALE: current execution, health and readiness unknown; values below are historical"
+        )
     return "\n".join(lines)
 
 
@@ -84,4 +88,42 @@ def stage_progress(snapshot, key):
         )
     except ValueError:
         lines.append("Last Stage; no Next request available")
+    return "\n".join(lines)
+
+
+def plan_progress(snapshot):
+    plan = snapshot.get("plan")
+    if plan is None:
+        summary = snapshot["run"].get("plan_result")
+        if not summary:
+            return "No active Plan. Normal Workload/Stage controls are independent."
+        return (
+            "Plan ended: "
+            + summary["status"]
+            + "; execution state and confirmation discarded.\n"
+            + json.dumps(summary, indent=2, ensure_ascii=False)
+        )
+    lines = [
+        f"Run: {plan['id']} · Template: {plan['template']}",
+        f"Config revision: {plan['config_revision']} · {plan['config_hash']}",
+        "Remaining steps are pending; no rollback on failure or abort.",
+    ]
+    for index, step in enumerate(plan["steps"], 1):
+        lines.append(
+            f"{index:02d} [{step['status']}] {step.get('action', 'Checkpoint')} {step['stage']} · {', '.join(step['workloads'])}"
+        )
+        lines.extend("  Check: " + item for item in step.get("checks", []))
+        if step.get("error"):
+            lines.append("  " + step["error"])
+    if checkpoint := plan.get("checkpoint"):
+        lines.extend(
+            [
+                "WAITING FOR RUN-LOCAL CONTINUE",
+                checkpoint["notice"],
+                "UNKNOWN / STALE observations"
+                if checkpoint["unknown"]
+                else "Fresh observations; human confirmation is not a safety interlock",
+                json.dumps(checkpoint["observations"], indent=2, ensure_ascii=False),
+            ]
+        )
     return "\n".join(lines)

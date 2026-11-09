@@ -14,7 +14,7 @@ from .model import Config
 
 
 def parser():
-    p = argparse.ArgumentParser(description="devdash Stage dashboard (Core IPC 2)")
+    p = argparse.ArgumentParser(description="devdash Observer / Operator / Plans (Core IPC 3)")
     p.add_argument("--version", action="version", version=f"devdash {__version__}")
     p.add_argument("--socket", type=Path, default=default_socket())
     commands = p.add_subparsers(dest="command", required=True)
@@ -27,6 +27,19 @@ def parser():
         op = commands.add_parser(name)
         op.add_argument("action", choices=("start", "stop", "restart"))
         op.add_argument("target")
+    plan = commands.add_parser("plan")
+    plans = plan.add_subparsers(dest="plan_command", required=True)
+    preview = plans.add_parser("preview")
+    preview.add_argument("kind", choices=("startup", "restart_from", "stop_from"), nargs="?")
+    preview.add_argument("--from-stage")
+    preview.add_argument("--template")
+    execute = plans.add_parser("execute")
+    execute.add_argument("preview_id")
+    proceed = plans.add_parser("continue")
+    proceed.add_argument("run_id")
+    proceed.add_argument("token")
+    plans.add_parser("cancel").add_argument("run_id")
+    plans.add_parser("templates")
     commands.add_parser("next").add_argument("after", help="explicit Stage ID; no saved cursor")
     commands.add_parser("check").add_argument("target")
     commands.add_parser("scan").add_argument("scope", choices=("user", "system"))
@@ -131,7 +144,18 @@ def main():
                     stream.write(json.dumps(result, indent=2, ensure_ascii=False))
                 save_source(output, Config(result["config"]))
         else:
-            if command in ("stage", "workload"):
+            if command == "plan":
+                subcommand = args.pop("plan_command")
+                args["command"] = {
+                    "preview": "plan_preview",
+                    "execute": "plan_execute",
+                    "continue": "plan_continue",
+                    "cancel": "plan_cancel",
+                    "templates": "plan_templates",
+                }[subcommand]
+                if subcommand == "preview":
+                    args = {key: value for key, value in args.items() if value is not None}
+            elif command in ("stage", "workload"):
                 args.update(command="operate", kind=command)
             elif command == "status":
                 args["command"] = "snapshot"

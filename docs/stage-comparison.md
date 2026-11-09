@@ -1,5 +1,7 @@
 # Coordinator方式とStage方式の比較
 
+この文書は`feature/staged-startup` / `b6cad2a`時点の比較記録です。現在の検証ブランチの変更・テスト結果は[On-demand Plan比較](on-demand-comparison.md)を参照してください。
+
 比較元はmain **`d143e97`**（Python/ttkbootstrap、Core IPC 1）、代替実装は`feature/staged-startup`（0.3.0.dev0、Core IPC 2）です。既存のmain・リリースタグは変更していません。このブランチを完成させることと採用・マージは別の判断です。
 
 ## 完成した代替方式

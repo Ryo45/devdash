@@ -20,10 +20,15 @@ pytestmark = [
 ]
 
 
-async def test_gui_health_start_observation_next_stage(health_scenario):
+@pytest.mark.parametrize("use_plan", [False, True])
+async def test_gui_health_start_observation_next_stage(health_scenario, use_plan):
+    from test_plan_health import enable_plan
+
     from devdash.gui import Window
 
     h = await health_scenario()
+    if use_plan:
+        enable_plan(h)
     h.monitor = asyncio.create_task(h.engine.monitor())
     window = Window(h.socket)
     callback_errors = []
@@ -49,7 +54,13 @@ async def test_gui_health_start_observation_next_stage(health_scenario):
     try:
         await wait(lambda: window.connected)
         select("stage", "robot")
-        click(window.buttons["start"])
+        if use_plan:
+            click(window.plan_preview_button)
+            await wait(lambda: hasattr(window, "plan_dialog"))
+            assert h.calls == []
+            click(window.plan_dialog.execute_button)
+        else:
+            click(window.buttons["start"])
         await h.health_wait()
         await wait(
             lambda: (
@@ -64,7 +75,11 @@ async def test_gui_health_start_observation_next_stage(health_scenario):
         h.release()
         await wait(
             lambda: (
-                window.snapshot["run"]["status"] == "completed"
+                (
+                    bool((window.snapshot.get("plan") or {}).get("checkpoint"))
+                    if use_plan
+                    else window.snapshot["run"]["status"] == "completed"
+                )
                 and window.snapshot["observations"].get("container", {}).get("health") == "healthy"
             )
         )
@@ -77,9 +92,14 @@ async def test_gui_health_start_observation_next_stage(health_scenario):
         )
         assert window.snapshot["observations"]["next"]["state"] == "inactive"
         select("stage", "robot")
-        assert "[completed]" in window.texts["Progress"].get("1.0", "end-1c")
-        assert "Next: next" in window.next_button.cget("text")
-        click(window.next_button)
+        if use_plan:
+            assert "WAITING FOR RUN-LOCAL CONTINUE" in window.texts["Plan"].get("1.0", "end-1c")
+            assert window.next_button.instate(["disabled"])
+            click(window.plan_continue)
+        else:
+            assert "[completed]" in window.texts["Progress"].get("1.0", "end-1c")
+            assert "Next: next" in window.next_button.cget("text")
+            click(window.next_button)
         await wait(
             lambda: (
                 window.snapshot["run"]["status"] == "completed"
@@ -88,7 +108,8 @@ async def test_gui_health_start_observation_next_stage(health_scenario):
         )
         assert h.calls == [(h.units["container"], "start"), (h.units["next"], "start")]
         assert h.jobs() == ["done"]
+        assert window.snapshot["plan"] is None
         assert not callback_errors, callback_errors
-        await h.record("gui-continue")
+        await h.record("gui-plan-continue" if use_plan else "gui-next")
     finally:
         window.close()
